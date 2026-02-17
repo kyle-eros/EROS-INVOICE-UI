@@ -22,7 +22,11 @@ Endpoints:
 - `GET /api/v1/invoicing/tasks/{task_id}`
 - `GET /api/v1/invoicing/artifacts/{task_id}`
 - `POST /api/v1/invoicing/invoices/upsert`
+- `POST /api/v1/invoicing/invoices/dispatch`
+- `POST /api/v1/invoicing/invoices/dispatch/{dispatch_id}/ack`
 - `POST /api/v1/invoicing/payments/events`
+- `POST /api/v1/invoicing/creator/magic-link`
+- `GET /api/v1/invoicing/creator/{token}/invoices`
 - `GET /api/v1/invoicing/reminders/summary`
 - `POST /api/v1/invoicing/reminders/run/once`
 - `GET /api/v1/invoicing/reminders/escalations`
@@ -44,14 +48,16 @@ Preview payload example:
 
 ### Frontend (`frontend/`)
 - Next.js app-router experience with EROS branded design system
-- `app/page.tsx`: executive landing page
-- `app/invoicing/page.tsx`: task queue + reminder operations panel
-- `lib/api.ts`: backend API helper for tasks and reminder endpoints
+- `app/page.tsx`: creator-facing landing page
+- `app/admin/page.tsx`: unified admin dashboard (ops + reference docs)
+- `app/creator/[token]/page.tsx`: creator-facing invoice notification view
+- `lib/api.ts`: backend API helper for task, reminder, and creator-notification endpoints
 
 ## Reminder Automation (OpenClaw-ready)
 
 The reminder pipeline is deterministic and run-once driven:
 - Invoice state and reminder counters are stored in-memory.
+- Invoices are reminder-eligible only after dispatch (`/invoices/dispatch`).
 - Payment updates arrive via API events (`/payments/events`).
 - Reminder runs execute through `/reminders/run/once`.
 - OpenClaw adapter is pluggable and defaults to dry-run-safe behavior.
@@ -61,6 +67,7 @@ Reminder policy defaults:
 - Re-send cooldown: 48 hours.
 - Stops when paid or opted out.
 - Escalates to manual queue after 6 reminders.
+- Multi-channel dispatch/reminders support `email` and `sms`.
 
 ### Invoice upsert payload example
 
@@ -99,6 +106,28 @@ Reminder policy defaults:
 }
 ```
 
+### Invoice dispatch payload example
+
+```json
+{
+  "invoice_id": "inv-2026-0001",
+  "dispatched_at": "2026-02-10T00:00:00Z",
+  "channels": ["email", "sms"],
+  "recipient_email": "creator@example.com",
+  "recipient_phone": "+15555550123",
+  "idempotency_key": "dispatch-2026-0001"
+}
+```
+
+### Creator magic-link payload example
+
+```json
+{
+  "creator_id": "creator-123",
+  "ttl_minutes": 60
+}
+```
+
 ### Reminder run payload example
 
 ```json
@@ -110,7 +139,7 @@ Reminder policy defaults:
 
 ## CSV Seed Validation Flow
 
-Use the seed tooling to transform CB sales + creator stats CSV reports into deterministic invoice test payloads and run the reminder pipeline through existing APIs.
+Use the seed tooling to transform CB sales + creator stats CSV reports into deterministic invoice test payloads and run the dispatch, creator-notification, payment, and reminder pipeline through existing APIs.
 
 Primary script:
 ```bash
@@ -173,6 +202,19 @@ npm install
 npm run dev
 ```
 
+Safe workflow notes:
+- `npm run dev` uses a lifecycle guard and records active process state in `frontend/.next-mode-state`.
+- Stop `npm run dev` before `npm run build`, `npm run start`, or `./scripts/check_baseline.sh`.
+- Use `npm run status` to inspect guard state.
+- Use `npm run clean` to clear `frontend/.next` and guard state files when recovering from stale artifacts.
+
+Frontend production commands:
+```bash
+cd frontend
+npm run build
+npm run start
+```
+
 ### Baseline checks (exact matrix)
 ```bash
 ./scripts/check_baseline.sh
@@ -181,6 +223,15 @@ Runs:
 - `cd backend && python3 -m pytest -q`
 - `cd frontend && npm run lint`
 - `cd frontend && npm run build`
+
+If baseline reports an active guarded Next process, stop `npm run dev` and rerun.
+
+Recommended runtime recovery for chunk/ENOENT issues:
+```bash
+cd frontend
+npm run clean
+npm run build
+```
 
 ### TUI bridge integration
 
@@ -198,7 +249,9 @@ Set these in the service environment (see `.env.example`):
 - `INVOICING_API_PREFIX`
 - `OPENCLAW_ENABLED`
 - `OPENCLAW_DRY_RUN_DEFAULT`
-- `OPENCLAW_CHANNEL`
+- `OPENCLAW_CHANNEL` (comma-separated, e.g. `email,sms`)
 - `OPENCLAW_API_BASE_URL`
 - `OPENCLAW_API_KEY`
+- `CREATOR_MAGIC_LINK_SECRET`
+- `CREATOR_PORTAL_BASE_URL`
 - `INVOICING_API_BASE_URL` (frontend server env)

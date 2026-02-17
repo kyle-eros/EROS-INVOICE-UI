@@ -1,7 +1,7 @@
 # Visual QA Checklist
 
 ## Brand Consistency
-- [ ] EROS wordmark appears with consistent casing, spacing, and accent treatment on both `/` and `/invoicing`.
+- [ ] EROS wordmark appears with consistent casing, spacing, and accent treatment on both `/` and `/admin`.
 - [ ] Tokenized palette is used consistently for text, borders, surfaces, and accents.
 - [ ] Typography hierarchy is consistent: display serif for headings, sans-serif for body copy.
 
@@ -29,6 +29,8 @@
 - [ ] `prefers-reduced-motion: reduce` disables non-essential animation.
 
 ## Regression Checks
+- [ ] `npm run status` reports no active guarded dev process before running build/start checks.
+- [ ] `npm run clean` succeeds when stale `.next` artifacts need to be reset.
 - [ ] `npm run lint` passes in `frontend/`.
 - [ ] `npm run build` passes in `frontend/`.
 - [ ] `./scripts/check_baseline.sh` passes at repository root.

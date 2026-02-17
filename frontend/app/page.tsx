@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { SurfaceCard } from "./components/SurfaceCard";
 
@@ -8,36 +7,33 @@ export default function HomePage() {
       <div className="section-stack">
         <header className="home-hero surface-card reveal-item">
           <div className="home-hero__copy">
-            <span className="eyebrow">Eros Revenue Operations</span>
+            <span className="eyebrow">EROS Creator Portal</span>
             <BrandWordmark size="lg" />
-            <h1 className="home-hero__title">Precision invoicing orchestration for high-trust agency finance.</h1>
+            <h1 className="home-hero__title">Your invoices, all in one place.</h1>
             <p className="kicker">
-              Operate preview, confirmation, and run workflows from a single premium control surface built for
-              executive clarity and operational confidence.
+              Check your balance, view your invoices, and confirm payments — all from the secure link sent to you.
             </p>
-          </div>
-          <div className="home-hero__actions">
-            <Link className="button-link" href="/invoicing">
-              Open Invoicing Dashboard
-            </Link>
-            <p className="home-hero__meta">Lifecycle support: preview, confirm, run-once, task and artifact visibility.</p>
           </div>
         </header>
 
-        <section className="home-trust-grid reveal-item" data-delay="1" aria-label="System highlights">
+        <section className="home-trust-grid reveal-item" data-delay="1" aria-label="Key features">
           <SurfaceCard className="home-trust-card">
-            <h2>Operational Readability</h2>
-            <p>Tabular task visibility with high-legibility hierarchy for rapid decision cycles.</p>
+            <h2>See What You Owe</h2>
+            <p>View all your outstanding invoices, amounts due, and payment due dates in one place.</p>
           </SurfaceCard>
           <SurfaceCard className="home-trust-card">
-            <h2>Workflow Integrity</h2>
-            <p>Deterministic invoicing lifecycle with preview-to-run controls and traceable status signals.</p>
-          </SurfaceCard>
-          <SurfaceCard className="home-trust-card">
-            <h2>Execution Confidence</h2>
-            <p>Production-safe Next.js delivery designed for stable releases and audit-friendly operations.</p>
+            <h2>Confirm Your Payments</h2>
+            <p>Once you&apos;ve submitted payment, mark your invoice as paid right from your portal.</p>
           </SurfaceCard>
         </section>
+
+        <SurfaceCard as="section" className="home-trust-card reveal-item" data-delay="2">
+          <h2>How do I access my invoices?</h2>
+          <p>
+            You&apos;ll receive a secure link by email or text message. Click the link to view and manage your invoices.
+            Links expire for your security — if yours has expired, contact your agency for a new one.
+          </p>
+        </SurfaceCard>
       </div>
     </main>
   );
