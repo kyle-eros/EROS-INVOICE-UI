@@ -108,6 +108,39 @@ Reminder policy defaults:
 }
 ```
 
+## CSV Seed Validation Flow
+
+Use the seed tooling to transform CB sales + creator stats CSV reports into deterministic invoice test payloads and run the reminder pipeline through existing APIs.
+
+Primary script:
+```bash
+python3 scripts/seed_from_cb_reports.py \
+  --sales-csv "/absolute/path/to/CB Daily Sales Report 2026 - February 2026.csv" \
+  --creator-csv "/absolute/path/to/Creator statistics report 2026:01:17 to 2026:02:15.csv" \
+  --creator-override "grace bennett paid=grace bennett" \
+  --run-live \
+  --inject-scenario-pack \
+  --simulate-payment-event
+```
+
+Convenience wrapper (defaults to the same two source paths):
+```bash
+./scripts/test_cb_seed_flow.sh
+```
+
+Artifacts are written to `/tmp/cb-seed-artifacts` (or provided output dir), including:
+- `profile.json`
+- `normalized_sessions.json`
+- `creator_stats_rows.json`
+- `invoice_upsert_payload.json`
+- `reconciliation.json`
+- `api_results.json`
+
+Notes:
+- Extraction rows are excluded from invoice derivation.
+- Reconciliation is advisory by default (`status=variance` can occur due to source/report scope differences).
+- Enable strict reconciliation failure with `--strict-reconciliation`.
+
 ## Run Commands
 
 ### Bootstrap (backend + frontend)
