@@ -1,0 +1,35 @@
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+
+# Python backend
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/.mypy_cache/
+backend/.venv/
+backend/.coverage
+backend/htmlcov/
+
+# Node frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/.npm/
+frontend/.pnpm-store/
+
+# Runtime artifacts
+artifacts/
+reports/
+tmp/
+data/
+exports/
+*.log
