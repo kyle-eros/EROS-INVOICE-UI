@@ -2,18 +2,23 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from .config import get_settings
+from .broker_tokens import BrokerTokenError, BrokerTokenPayload, create_broker_token, decode_broker_token, encode_broker_token
+from .config import Settings, get_settings
 from .creator_tokens import CreatorTokenError, create_creator_token, decode_creator_token, encode_creator_token
 from .models import (
     AdminLoginRequest,
     AdminLoginResponse,
     ArtifactListResponse,
+    BrokerTokenRequest,
+    BrokerTokenResponse,
+    BrokerTokenRevokeRequest,
     ConfirmResponse,
     CreatorDispatchAcknowledgeResponse,
     CreatorInvoicesResponse,
     EscalationListResponse,
     InvoiceDispatchRequest,
     InvoiceDispatchResponse,
+    InvoiceRecord,
     InvoiceUpsertRequest,
     InvoiceUpsertResponse,
     PasskeyConfirmResponse,
@@ -36,7 +41,7 @@ from .models import (
     TaskDetail,
     TaskSummary,
 )
-from .openclaw import StubOpenClawSender
+from .openclaw import HttpOpenClawSender, OpenClawSender, StubOpenClawSender
 from .store import (
     CreatorNotFoundError,
     DispatchNotFoundError,
@@ -48,7 +53,20 @@ from .store import (
 _settings = get_settings()
 router = APIRouter(prefix=f"{_settings.api_prefix}/invoicing", tags=["invoicing"])
 task_store = InMemoryTaskStore()
-openclaw_sender = StubOpenClawSender(enabled=_settings.openclaw_enabled, channel=_settings.openclaw_channel)
+
+
+def _create_sender(settings: Settings) -> OpenClawSender:
+    if settings.openclaw_sender_type == "http":
+        return HttpOpenClawSender(
+            base_url=settings.openclaw_api_base_url,
+            api_key=settings.openclaw_api_key,
+            channels={ch.strip() for ch in settings.openclaw_channel.split(",") if ch.strip()},
+            timeout_seconds=settings.openclaw_timeout_seconds,
+        )
+    return StubOpenClawSender(enabled=settings.openclaw_enabled, channel=settings.openclaw_channel)
+
+
+openclaw_sender: OpenClawSender = _create_sender(_settings)
 
 
 def _require_admin(request: Request) -> None:
@@ -61,6 +79,19 @@ def _require_admin(request: Request) -> None:
             raise CreatorTokenError("not an admin token")
     except CreatorTokenError as exc:
         raise HTTPException(401, str(exc)) from exc
+
+
+def _require_broker_token(request: Request, required_scope: str) -> BrokerTokenPayload:
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+    if not token:
+        raise HTTPException(401, "broker token required")
+    try:
+        payload = decode_broker_token(token, secret=_settings.broker_token_secret, required_scope=required_scope)
+    except BrokerTokenError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    if task_store.is_broker_token_revoked(payload.token_id):
+        raise HTTPException(401, "broker token revoked")
+    return payload
 
 
 def _client_ip(request: Request) -> str:
@@ -302,3 +333,67 @@ def get_my_invoices(request: Request) -> CreatorInvoicesResponse:
         return task_store.get_creator_invoices(payload.creator_id)
     except CreatorNotFoundError as exc:
         raise HTTPException(404, f"creator not found: {payload.creator_id}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Agent endpoints (broker-token authenticated)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/agent/reminders/summary", response_model=ReminderSummaryResponse)
+def agent_reminder_summary(request: Request) -> ReminderSummaryResponse:
+    _require_broker_token(request, "reminders:summary")
+    return task_store.get_reminder_summary()
+
+
+@router.get("/agent/invoices", response_model=list[InvoiceRecord])
+def agent_list_invoices(request: Request) -> list[InvoiceRecord]:
+    _require_broker_token(request, "invoices:read")
+    return task_store.list_invoices()
+
+
+@router.post("/agent/reminders/run/once", response_model=ReminderRunResponse)
+def agent_run_reminders(request: Request, payload: ReminderRunRequest | None = None) -> ReminderRunResponse:
+    _require_broker_token(request, "reminders:run")
+    request_payload = payload or ReminderRunRequest(dry_run=_settings.openclaw_dry_run_default)
+    return task_store.run_reminders(request_payload, openclaw_sender)
+
+
+@router.get("/agent/reminders/escalations", response_model=EscalationListResponse)
+def agent_list_escalations(request: Request) -> EscalationListResponse:
+    _require_broker_token(request, "reminders:read")
+    return EscalationListResponse(items=task_store.list_escalations())
+
+
+# ---------------------------------------------------------------------------
+# Broker token management (admin-only)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/agent/tokens", response_model=BrokerTokenResponse, status_code=status.HTTP_201_CREATED)
+def create_agent_token(payload: BrokerTokenRequest, request: Request) -> BrokerTokenResponse:
+    _require_admin(request)
+    ttl = payload.ttl_minutes or _settings.broker_token_default_ttl_minutes
+    if ttl > _settings.broker_token_max_ttl_minutes:
+        raise HTTPException(400, f"ttl_minutes cannot exceed {_settings.broker_token_max_ttl_minutes}")
+    token_payload = create_broker_token(
+        agent_id=payload.agent_id,
+        scopes=frozenset(payload.scopes),
+        secret=_settings.broker_token_secret,
+        ttl_minutes=ttl,
+    )
+    token = encode_broker_token(token_payload, secret=_settings.broker_token_secret)
+    return BrokerTokenResponse(
+        token=token,
+        agent_id=token_payload.agent_id,
+        scopes=sorted(token_payload.scopes),
+        expires_at=token_payload.expires_at,
+        token_id=token_payload.token_id,
+    )
+
+
+@router.post("/agent/tokens/revoke")
+def revoke_agent_token(payload: BrokerTokenRevokeRequest, request: Request) -> dict:
+    _require_admin(request)
+    task_store.revoke_broker_token(payload.token_id)
+    return {"token_id": payload.token_id, "revoked": True}

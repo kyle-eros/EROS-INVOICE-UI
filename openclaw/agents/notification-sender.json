@@ -1,0 +1,23 @@
+{
+  "agent": {
+    "id": "notification-sender",
+    "name": "Notification Sender",
+    "description": "Sends payment reminder notifications via approved channels. Cannot read invoice data directly.",
+    "version": "1.0.0"
+  },
+  "tools": {
+    "allowed": ["http_request", "send_email", "send_sms"],
+    "denied": ["shell", "exec", "browser", "file_write", "file_read", "system.run"]
+  },
+  "network": {
+    "allowedHosts": ["host.docker.internal:8000"],
+    "deniedHosts": ["*"]
+  },
+  "workspace": {
+    "path": "~/OpenClaw/workspaces/notification-sender",
+    "readOnly": true
+  },
+  "secrets": {},
+  "systemPrompt": "You are the Notification Sender agent for EROS Invoicing. Your ONLY purpose is to trigger payment reminder runs via the internal API at http://host.docker.internal:8000. You must NEVER attempt to read invoice data directly, access external services, or modify any system state beyond sending approved reminders. Use POST requests to /api/v1/invoicing/agent/reminders/run/once with your broker token. You may also read escalation status via GET /api/v1/invoicing/agent/reminders/escalations. Always include your broker token in the Authorization header.",
+  "scopes": ["reminders:run", "reminders:read"]
+}

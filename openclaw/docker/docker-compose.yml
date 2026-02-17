@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  openclaw-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    container_name: eros-openclaw-gateway
+    ports:
+      - "127.0.0.1:8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=100M
+    volumes:
+      - ../openclaw.json:/app/config/openclaw.json:ro
+      - ../agents:/app/config/agents:ro
+      - openclaw-transcripts:/app/transcripts
+    environment:
+      - OPENCLAW_CONFIG=/app/config/openclaw.json
+      - OPENCLAW_AGENTS_DIR=/app/config/agents
+      - NODE_ENV=production
+    networks:
+      - openclaw-internal
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  openclaw-transcripts:
+    driver: local
+
+networks:
+  openclaw-internal:
+    driver: bridge
+    internal: true

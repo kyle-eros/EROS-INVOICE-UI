@@ -31,6 +31,11 @@ class Settings:
     creator_session_secret: str = "dev-session-secret"
     creator_session_ttl_minutes: int = 120
     cookie_secure: bool = True
+    broker_token_secret: str = "dev-broker-secret"
+    broker_token_default_ttl_minutes: int = 60
+    broker_token_max_ttl_minutes: int = 480
+    openclaw_timeout_seconds: int = 30
+    openclaw_sender_type: str = "stub"
 
 
 def get_settings() -> Settings:
@@ -49,4 +54,9 @@ def get_settings() -> Settings:
         creator_session_secret=os.getenv("CREATOR_SESSION_SECRET", "dev-session-secret"),
         creator_session_ttl_minutes=int(os.getenv("CREATOR_SESSION_TTL_MINUTES", "120")),
         cookie_secure=_as_bool(os.getenv("COOKIE_SECURE"), True),
+        broker_token_secret=os.getenv("BROKER_TOKEN_SECRET", "dev-broker-secret"),
+        broker_token_default_ttl_minutes=int(os.getenv("BROKER_TOKEN_DEFAULT_TTL_MINUTES", "60")),
+        broker_token_max_ttl_minutes=int(os.getenv("BROKER_TOKEN_MAX_TTL_MINUTES", "480")),
+        openclaw_timeout_seconds=int(os.getenv("OPENCLAW_TIMEOUT_SECONDS", "30")),
+        openclaw_sender_type=os.getenv("OPENCLAW_SENDER_TYPE", "stub"),
     )

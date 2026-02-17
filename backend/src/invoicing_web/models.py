@@ -527,3 +527,50 @@ class EscalationItem(BaseModel):
 
 class EscalationListResponse(BaseModel):
     items: list[EscalationItem]
+
+
+ALLOWED_BROKER_SCOPES = frozenset({
+    "invoices:read",
+    "reminders:read",
+    "reminders:run",
+    "reminders:summary",
+})
+
+
+class BrokerTokenRequest(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=128)
+    scopes: list[str] = Field(min_length=1, max_length=10)
+    ttl_minutes: int | None = Field(default=None, ge=1, le=480)
+
+    @field_validator("agent_id")
+    @classmethod
+    def _normalize_agent_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("agent_id cannot be blank")
+        return normalized
+
+    @field_validator("scopes")
+    @classmethod
+    def _validate_scopes(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for scope in value:
+            s = scope.strip()
+            if not s:
+                raise ValueError("scope entries cannot be blank")
+            if s not in ALLOWED_BROKER_SCOPES:
+                raise ValueError(f"invalid scope: {s}")
+            normalized.append(s)
+        return normalized
+
+
+class BrokerTokenResponse(BaseModel):
+    token: str
+    agent_id: str
+    scopes: list[str]
+    expires_at: datetime
+    token_id: str
+
+
+class BrokerTokenRevokeRequest(BaseModel):
+    token_id: str = Field(min_length=1, max_length=128)

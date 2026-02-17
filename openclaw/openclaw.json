@@ -1,0 +1,33 @@
+{
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "auth": {
+      "enabled": true,
+      "pairingRequired": true
+    }
+  },
+  "sandbox": {
+    "mode": "all"
+  },
+  "logging": {
+    "level": "info",
+    "redactSensitive": "tools",
+    "redactionPatterns": [
+      "Bearer [A-Za-z0-9._-]+",
+      "api[_-]?key[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9._-]+",
+      "secret[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9._-]+"
+    ]
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "security": {
+    "pairingRequired": true,
+    "maxAgents": 4,
+    "tokenRotationReminder": true
+  },
+  "agents": {
+    "configDir": "./agents"
+  }
+}

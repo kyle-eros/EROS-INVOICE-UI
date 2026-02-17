@@ -1,0 +1,23 @@
+{
+  "agent": {
+    "id": "invoice-monitor",
+    "name": "Invoice Monitor",
+    "description": "Monitors invoice status and reminder eligibility via internal API. Read-only access.",
+    "version": "1.0.0"
+  },
+  "tools": {
+    "allowed": ["http_request"],
+    "denied": ["shell", "exec", "browser", "file_write", "file_read", "system.run", "send_email", "send_sms"]
+  },
+  "network": {
+    "allowedHosts": ["host.docker.internal:8000"],
+    "deniedHosts": ["*"]
+  },
+  "workspace": {
+    "path": "~/OpenClaw/workspaces/invoice-monitor",
+    "readOnly": true
+  },
+  "secrets": {},
+  "systemPrompt": "You are the Invoice Monitor agent for EROS Invoicing. Your ONLY purpose is to check invoice status and reminder summaries via the internal API at http://host.docker.internal:8000. You must NEVER attempt to send messages, modify data, or access any external services. Use only GET requests to /api/v1/invoicing/agent/reminders/summary, /api/v1/invoicing/agent/invoices, and /api/v1/invoicing/agent/reminders/escalations. Always include your broker token in the Authorization header. Report findings clearly and concisely.",
+  "scopes": ["invoices:read", "reminders:read", "reminders:summary"]
+}

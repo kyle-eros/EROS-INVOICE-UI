@@ -1,0 +1,22 @@
+FROM node:20-alpine AS base
+
+RUN addgroup -g 1001 -S openclaw && \
+    adduser -S -u 1001 -G openclaw openclaw
+
+WORKDIR /app
+
+# Install OpenClaw gateway (placeholder - replace with actual package when available)
+# RUN npm install -g @openclaw/gateway@latest
+
+RUN mkdir -p /app/config /app/config/agents /app/transcripts && \
+    chown -R openclaw:openclaw /app
+
+USER openclaw
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1
+
+# Entrypoint placeholder - replace with actual gateway binary
+CMD ["echo", "OpenClaw gateway placeholder - replace with actual entrypoint"]

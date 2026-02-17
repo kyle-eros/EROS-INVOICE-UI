@@ -154,6 +154,7 @@ class InMemoryTaskStore:
         self._passkey_hash_index: dict[str, str] = {}
         self._revoked_creators: set[str] = set()
         self._login_attempts: dict[str, list[datetime]] = {}
+        self._revoked_broker_tokens: set[str] = set()
 
     def reset(self) -> None:
         with self._lock:
@@ -177,6 +178,7 @@ class InMemoryTaskStore:
             self._passkey_hash_index.clear()
             self._revoked_creators.clear()
             self._login_attempts.clear()
+            self._revoked_broker_tokens.clear()
 
     def generate_passkey(self, creator_id: str, creator_name: str) -> tuple[_PasskeyRecord, str]:
         with self._lock:
@@ -241,6 +243,14 @@ class InMemoryTaskStore:
             if client_ip not in self._login_attempts:
                 self._login_attempts[client_ip] = []
             self._login_attempts[client_ip].append(now)
+
+    def revoke_broker_token(self, token_id: str) -> None:
+        with self._lock:
+            self._revoked_broker_tokens.add(token_id)
+
+    def is_broker_token_revoked(self, token_id: str) -> bool:
+        with self._lock:
+            return token_id in self._revoked_broker_tokens
 
     def create_preview(self, payload: PreviewRequest) -> _TaskRecord:
         with self._lock:
