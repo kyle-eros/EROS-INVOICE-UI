@@ -904,3 +904,142 @@ th {
   gap: var(--space-6);
   padding-top: var(--space-6);
 }
+
+/* ── Login & Gate Pages ── */
+
+.login-card {
+  padding: var(--space-8);
+  display: grid;
+  gap: var(--space-6);
+  max-width: 440px;
+  margin: 0 auto;
+}
+
+.login-card h1 {
+  font-size: 1.6rem;
+}
+
+.login-input {
+  appearance: none;
+  width: 100%;
+  padding: 12px var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: rgba(12, 16, 24, 0.8);
+  color: var(--text-strong);
+  font-size: 1rem;
+  font-family: var(--font-body);
+  transition:
+    border-color var(--duration-med) var(--ease-premium),
+    box-shadow var(--duration-med) var(--ease-premium);
+}
+
+.login-input::placeholder {
+  color: var(--text-muted);
+}
+
+.login-input:focus {
+  outline: none;
+  border-color: var(--brand-primary-soft);
+  box-shadow: 0 0 0 3px rgba(60, 137, 221, 0.25);
+}
+
+.login-confirm-name {
+  font-family: var(--font-display);
+  font-size: 1.8rem;
+  color: var(--text-strong);
+  text-align: center;
+  padding: var(--space-4) 0;
+}
+
+.login-actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.login-error {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(212, 106, 106, 0.5);
+  color: #ffd7d7;
+  background: rgba(212, 106, 106, 0.2);
+  font-size: 0.9rem;
+}
+
+.passkey-display {
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(79, 178, 134, 0.45);
+  background: rgba(79, 178, 134, 0.1);
+  font-family: monospace;
+  font-size: 0.9rem;
+  color: var(--text-strong);
+  word-break: break-all;
+  user-select: all;
+}
+
+.passkey-warning {
+  color: var(--warning);
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.gate-card {
+  padding: var(--space-8);
+  display: grid;
+  gap: var(--space-6);
+  max-width: 380px;
+  margin: 0 auto;
+}
+
+.gate-card h1 {
+  font-size: 1.4rem;
+  text-align: center;
+}
+
+/* ── Creator Access Management (Admin) ── */
+
+.passkey-mgmt {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.passkey-mgmt__form {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: 1fr 1fr auto;
+  align-items: end;
+}
+
+.passkey-mgmt__field {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.passkey-mgmt__field label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+@media (max-width: 768px) {
+  .login-card {
+    padding: var(--space-6);
+    max-width: 100%;
+  }
+
+  .gate-card {
+    padding: var(--space-6);
+    max-width: 100%;
+  }
+
+  .login-actions {
+    flex-direction: column;
+  }
+
+  .passkey-mgmt__form {
+    grid-template-columns: 1fr;
+  }
+}

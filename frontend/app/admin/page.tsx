@@ -1,16 +1,22 @@
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { AdminLogoutButton } from "./AdminLogoutButton";
 import { BrandWordmark } from "../components/BrandWordmark";
 import { DataTable, type DataColumn } from "../components/DataTable";
 import { EmptyState } from "../components/EmptyState";
 import { StatusBadge, type StatusTone } from "../components/StatusBadge";
 import { SurfaceCard } from "../components/SurfaceCard";
 import {
+  generatePasskey,
   getReminderSummary,
+  listPasskeys,
   listReminderEscalations,
   listTasks,
+  revokePasskey,
   runReminderCycle,
+  type PasskeyListItem,
   type ReminderEscalation,
   type ReminderSummary,
   type TaskSummary,
@@ -47,6 +53,10 @@ const STATUS_TONE: Record<TaskSummary["status"], StatusTone> = {
 interface AdminPageSearchParams {
   reminderRun?: string;
   mode?: string;
+  passkeyGen?: string;
+  passkeyRevoke?: string;
+  generatedPasskey?: string;
+  generatedCreator?: string;
 }
 
 async function runRemindersAction(formData: FormData) {
@@ -60,6 +70,49 @@ async function runRemindersAction(formData: FormData) {
   } catch {
     revalidatePath("/admin");
     redirect(`/admin?reminderRun=error&mode=${mode}`);
+  }
+}
+
+async function generatePasskeyAction(formData: FormData) {
+  "use server";
+  const creatorId = (formData.get("creator_id") as string)?.trim();
+  const creatorName = (formData.get("creator_name") as string)?.trim();
+  if (!creatorId || !creatorName) {
+    redirect("/admin?passkeyGen=error");
+  }
+  const cookieStore = await cookies();
+  const adminToken = cookieStore.get("admin_session")?.value;
+  if (!adminToken) {
+    redirect("/admin/gate");
+  }
+  try {
+    const result = await generatePasskey(creatorId, creatorName, adminToken);
+    revalidatePath("/admin");
+    redirect(`/admin?passkeyGen=success&generatedPasskey=${encodeURIComponent(result.passkey)}&generatedCreator=${encodeURIComponent(creatorName)}`);
+  } catch {
+    revalidatePath("/admin");
+    redirect("/admin?passkeyGen=error");
+  }
+}
+
+async function revokePasskeyAction(formData: FormData) {
+  "use server";
+  const creatorId = (formData.get("creator_id") as string)?.trim();
+  if (!creatorId) {
+    redirect("/admin?passkeyRevoke=error");
+  }
+  const cookieStore = await cookies();
+  const adminToken = cookieStore.get("admin_session")?.value;
+  if (!adminToken) {
+    redirect("/admin/gate");
+  }
+  try {
+    await revokePasskey(creatorId, adminToken);
+    revalidatePath("/admin");
+    redirect("/admin?passkeyRevoke=success");
+  } catch {
+    revalidatePath("/admin");
+    redirect("/admin?passkeyRevoke=error");
   }
 }
 
@@ -125,6 +178,25 @@ export default async function AdminPage({
     reminderError = error instanceof Error ? error.message : "Unable to load reminder data";
   }
 
+  let passkeys: PasskeyListItem[] = [];
+  let passkeyError: string | null = null;
+  const cookieStore = await cookies();
+  const adminToken = cookieStore.get("admin_session")?.value ?? "";
+
+  try {
+    if (adminToken) {
+      const result = await listPasskeys(adminToken);
+      passkeys = result.creators;
+    }
+  } catch (error) {
+    passkeyError = error instanceof Error ? error.message : "Unable to load passkeys";
+  }
+
+  const generatedPasskey = resolvedSearchParams.generatedPasskey ?? null;
+  const generatedCreator = resolvedSearchParams.generatedCreator ?? null;
+  const passkeyGenState = resolvedSearchParams.passkeyGen;
+  const passkeyRevokeState = resolvedSearchParams.passkeyRevoke;
+
   const latestTimestamp = getLatestTimestamp(tasks);
   const columns: DataColumn<TaskSummary>[] = [
     {
@@ -186,6 +258,7 @@ export default async function AdminPage({
             <BrandWordmark size="sm" />
             <h1>Admin Dashboard</h1>
             <p className="kicker">Manage creator invoices, track payments, and monitor reminder activity.</p>
+            <AdminLogoutButton />
           </div>
           <SurfaceCard className="invoicing-metric-card" aria-label="Queue snapshot">
             <span className="eyebrow">Queue Snapshot</span>
@@ -270,6 +343,83 @@ export default async function AdminPage({
           ) : (
             <p className="muted-small">No invoices currently need manual follow-up.</p>
           )}
+        </SurfaceCard>
+
+        {/* ── Creator Access ── */}
+        <SurfaceCard as="section" className="invoicing-table-card reveal-item" data-delay="1">
+          <div className="invoicing-table-card__head">
+            <h2>Creator Access</h2>
+            <p className="kicker">Generate and manage passkeys for creator portal access.</p>
+          </div>
+
+          <div className="passkey-mgmt">
+            <form action={generatePasskeyAction} className="passkey-mgmt__form">
+              <div className="passkey-mgmt__field">
+                <label htmlFor="creator_id">Creator ID</label>
+                <input className="login-input" id="creator_id" name="creator_id" required placeholder="e.g. creator-001" />
+              </div>
+              <div className="passkey-mgmt__field">
+                <label htmlFor="creator_name">Creator Name</label>
+                <input className="login-input" id="creator_name" name="creator_name" required placeholder="e.g. Jane Doe" />
+              </div>
+              <button type="submit" className="button-link">Generate Passkey</button>
+            </form>
+
+            {passkeyGenState === "success" && generatedPasskey ? (
+              <div>
+                <p className="muted-small">Passkey generated for <strong>{generatedCreator}</strong>:</p>
+                <div className="passkey-display">{generatedPasskey}</div>
+                <p className="passkey-warning">This passkey will not be shown again. Copy it now and send it to the creator.</p>
+              </div>
+            ) : passkeyGenState === "error" ? (
+              <p className="login-error">Failed to generate passkey. Please try again.</p>
+            ) : null}
+
+            {passkeyRevokeState === "success" ? (
+              <p className="reminder-run-banner reminder-run-banner--ok">Passkey revoked successfully.</p>
+            ) : passkeyRevokeState === "error" ? (
+              <p className="login-error">Failed to revoke passkey.</p>
+            ) : null}
+
+            {passkeyError ? (
+              <p className="muted-small">Passkey data unavailable: {passkeyError}</p>
+            ) : passkeys.length > 0 ? (
+              <div>
+                <h3 style={{ fontSize: "1.04rem", color: "var(--text-strong)", marginBottom: "var(--space-3)" }}>Active Creators</h3>
+                <div className="data-table-shell">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Creator ID</th>
+                        <th>Name</th>
+                        <th>Key Prefix</th>
+                        <th>Created</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {passkeys.map((pk) => (
+                        <tr key={pk.creator_id}>
+                          <td><span className="task-id">{pk.creator_id}</span></td>
+                          <td>{pk.creator_name}</td>
+                          <td><code style={{ fontSize: "0.85rem", padding: "2px 6px", borderRadius: "4px", background: "rgba(123, 184, 244, 0.12)", color: "var(--brand-primary-soft)" }}>{pk.display_prefix}...</code></td>
+                          <td><span className="muted-small">{formatTimestamp(pk.created_at)}</span></td>
+                          <td>
+                            <form action={revokePasskeyAction} style={{ display: "inline" }}>
+                              <input type="hidden" name="creator_id" value={pk.creator_id} />
+                              <button type="submit" className="button-link button-link--secondary" style={{ padding: "4px 12px", fontSize: "0.8rem" }}>Revoke</button>
+                            </form>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <p className="muted-small">No active passkeys. Generate one above to give a creator access.</p>
+            )}
+          </div>
         </SurfaceCard>
 
         {/* ── Current Tasks ── */}
@@ -459,18 +609,19 @@ export default async function AdminPage({
             <SurfaceCard as="section" className="admin-doc-card reveal-item">
               <h2>Creator Portal Access</h2>
               <p>
-                Creators access their invoices through a secure link (magic link) included in reminder emails and SMS
-                messages. Here&apos;s how it works:
+                Creators access their invoices through a persistent passkey. Admins generate a passkey per creator and send it
+                out-of-band. Here&apos;s how it works:
               </p>
               <ol className="admin-doc-list">
-                <li>When an invoice is dispatched, a unique signed token is generated for the creator</li>
-                <li>The token is embedded in a URL that links directly to the creator&apos;s invoice portal</li>
-                <li>Tokens expire after a configurable time (default: 60 minutes, max: 7 days)</li>
-                <li>The portal shows only that creator&apos;s invoices &mdash; they cannot see other creators or admin pages</li>
+                <li>Generate a passkey for a creator in the Creator Access section above</li>
+                <li>Send the passkey to the creator (email, SMS, or any secure channel)</li>
+                <li>The creator pastes the passkey on the login page to access their portal</li>
+                <li>Sessions last 2 hours; creators can log in again with the same passkey</li>
               </ol>
               <div className="admin-doc-highlight">
-                <strong>Security:</strong> Tokens use HMAC-SHA256 signatures to prevent tampering. Expired or invalid tokens
-                are rejected with a 401 error. Creators see a friendly error message and can request a new link.
+                <strong>Security:</strong> Passkeys are 256-bit random tokens, stored as SHA-256 hashes. Sessions use
+                HMAC-SHA256 signed tokens with 2-hour expiry. Revoking a passkey immediately blocks all new and existing
+                sessions for that creator.
               </div>
             </SurfaceCard>
 

@@ -1,14 +1,30 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from .config import get_settings
+from .creator_tokens import CreatorTokenError, create_creator_token, decode_creator_token, encode_creator_token
 from .models import (
+    AdminLoginRequest,
+    AdminLoginResponse,
     ArtifactListResponse,
     ConfirmResponse,
+    CreatorDispatchAcknowledgeResponse,
+    CreatorInvoicesResponse,
     EscalationListResponse,
+    InvoiceDispatchRequest,
+    InvoiceDispatchResponse,
     InvoiceUpsertRequest,
     InvoiceUpsertResponse,
+    PasskeyConfirmResponse,
+    PasskeyGenerateRequest,
+    PasskeyGenerateResponse,
+    PasskeyListItem,
+    PasskeyListResponse,
+    PasskeyLoginRequest,
+    PasskeyLookupResponse,
+    PasskeyRevokeRequest,
+    PasskeyRevokeResponse,
     PaymentEventRequest,
     PaymentEventResponse,
     PreviewRequest,
@@ -21,12 +37,37 @@ from .models import (
     TaskSummary,
 )
 from .openclaw import StubOpenClawSender
-from .store import InMemoryTaskStore, InvoiceNotFoundError, TaskNotFoundError
+from .store import (
+    CreatorNotFoundError,
+    DispatchNotFoundError,
+    InMemoryTaskStore,
+    InvoiceNotFoundError,
+    TaskNotFoundError,
+)
 
 _settings = get_settings()
 router = APIRouter(prefix=f"{_settings.api_prefix}/invoicing", tags=["invoicing"])
 task_store = InMemoryTaskStore()
 openclaw_sender = StubOpenClawSender(enabled=_settings.openclaw_enabled, channel=_settings.openclaw_channel)
+
+
+def _require_admin(request: Request) -> None:
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+    if not token:
+        raise HTTPException(401, "admin session required")
+    try:
+        payload = decode_creator_token(token, secret=_settings.admin_session_secret)
+        if payload.creator_id != "__admin__":
+            raise CreatorTokenError("not an admin token")
+    except CreatorTokenError as exc:
+        raise HTTPException(401, str(exc)) from exc
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 @router.post("/preview", response_model=PreviewResponse, status_code=status.HTTP_201_CREATED)
@@ -86,6 +127,24 @@ def upsert_invoices(payload: InvoiceUpsertRequest) -> InvoiceUpsertResponse:
     return InvoiceUpsertResponse(processed_count=len(records), invoices=records)
 
 
+@router.post("/invoices/dispatch", response_model=InvoiceDispatchResponse)
+def dispatch_invoice(payload: InvoiceDispatchRequest) -> InvoiceDispatchResponse:
+    try:
+        return task_store.dispatch_invoice(payload)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"invoice not found: {payload.invoice_id}") from exc
+
+
+@router.post("/invoices/dispatch/{dispatch_id}/ack", response_model=CreatorDispatchAcknowledgeResponse)
+def acknowledge_dispatch(dispatch_id: str) -> CreatorDispatchAcknowledgeResponse:
+    try:
+        return task_store.acknowledge_dispatch(dispatch_id)
+    except DispatchNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"dispatch not found: {dispatch_id}") from exc
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"invoice not found for dispatch: {dispatch_id}") from exc
+
+
 @router.post("/payments/events", response_model=PaymentEventResponse)
 def ingest_payment_event(payload: PaymentEventRequest) -> PaymentEventResponse:
     try:
@@ -108,3 +167,138 @@ def run_reminders_once(payload: ReminderRunRequest | None = None) -> ReminderRun
 @router.get("/reminders/escalations", response_model=EscalationListResponse)
 def get_reminder_escalations() -> EscalationListResponse:
     return EscalationListResponse(items=task_store.list_escalations())
+
+
+# ---------------------------------------------------------------------------
+# Admin auth
+# ---------------------------------------------------------------------------
+
+
+@router.post("/admin/login", response_model=AdminLoginResponse)
+def admin_login(payload: AdminLoginRequest) -> AdminLoginResponse:
+    if not _settings.admin_password:
+        raise HTTPException(503, "admin password not configured")
+    if payload.password != _settings.admin_password:
+        raise HTTPException(401, "invalid password")
+    token_payload = create_creator_token(
+        creator_id="__admin__",
+        secret=_settings.admin_session_secret,
+        ttl_minutes=480,
+    )
+    token = encode_creator_token(token_payload, secret=_settings.admin_session_secret)
+    return AdminLoginResponse(
+        authenticated=True,
+        session_token=token,
+        expires_at=token_payload.expires_at,
+    )
+
+
+@router.get("/admin/session")
+def admin_session(request: Request) -> dict:
+    _require_admin(request)
+    return {"authenticated": True}
+
+
+# ---------------------------------------------------------------------------
+# Passkey management (admin-only)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/passkeys/generate", response_model=PasskeyGenerateResponse)
+def generate_passkey(payload: PasskeyGenerateRequest, request: Request) -> PasskeyGenerateResponse:
+    _require_admin(request)
+    record, raw_passkey = task_store.generate_passkey(payload.creator_id, payload.creator_name)
+    return PasskeyGenerateResponse(
+        creator_id=record.creator_id,
+        creator_name=record.creator_name,
+        passkey=raw_passkey,
+        display_prefix=record.display_prefix,
+        created_at=record.created_at,
+    )
+
+
+@router.get("/passkeys", response_model=PasskeyListResponse)
+def list_passkeys(request: Request) -> PasskeyListResponse:
+    _require_admin(request)
+    records = task_store.list_passkeys()
+    items = [
+        PasskeyListItem(
+            creator_id=r.creator_id,
+            creator_name=r.creator_name,
+            display_prefix=r.display_prefix,
+            created_at=r.created_at,
+        )
+        for r in records
+    ]
+    return PasskeyListResponse(creators=items)
+
+
+@router.post("/passkeys/revoke", response_model=PasskeyRevokeResponse)
+def revoke_passkey(payload: PasskeyRevokeRequest, request: Request) -> PasskeyRevokeResponse:
+    _require_admin(request)
+    revoked = task_store.revoke_passkey(payload.creator_id)
+    return PasskeyRevokeResponse(creator_id=payload.creator_id, revoked=revoked)
+
+
+# ---------------------------------------------------------------------------
+# Creator auth
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/lookup", response_model=PasskeyLookupResponse)
+def auth_lookup(payload: PasskeyLoginRequest, request: Request) -> PasskeyLookupResponse:
+    ip = _client_ip(request)
+    if not task_store.check_rate_limit(ip):
+        raise HTTPException(429, "too many login attempts, try again later")
+    record = task_store.lookup_by_passkey(payload.passkey)
+    if record is None:
+        task_store.record_failed_attempt(ip)
+        raise HTTPException(401, "invalid passkey")
+    return PasskeyLookupResponse(creator_id=record.creator_id, creator_name=record.creator_name)
+
+
+@router.post("/auth/confirm", response_model=PasskeyConfirmResponse)
+def auth_confirm(payload: PasskeyLoginRequest, request: Request) -> PasskeyConfirmResponse:
+    ip = _client_ip(request)
+    if not task_store.check_rate_limit(ip):
+        raise HTTPException(429, "too many login attempts, try again later")
+    record = task_store.lookup_by_passkey(payload.passkey)
+    if record is None:
+        task_store.record_failed_attempt(ip)
+        raise HTTPException(401, "invalid passkey")
+    if task_store.is_creator_revoked(record.creator_id):
+        raise HTTPException(401, "passkey has been revoked")
+    token_payload = create_creator_token(
+        creator_id=record.creator_id,
+        secret=_settings.creator_session_secret,
+        ttl_minutes=_settings.creator_session_ttl_minutes,
+    )
+    token = encode_creator_token(token_payload, secret=_settings.creator_session_secret)
+    return PasskeyConfirmResponse(
+        creator_id=record.creator_id,
+        creator_name=record.creator_name,
+        session_token=token,
+        expires_at=token_payload.expires_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session-based creator data
+# ---------------------------------------------------------------------------
+
+
+@router.get("/me/invoices", response_model=CreatorInvoicesResponse)
+def get_my_invoices(request: Request) -> CreatorInvoicesResponse:
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+    if not token:
+        raise HTTPException(401, "session required")
+    try:
+        payload = decode_creator_token(token, secret=_settings.creator_session_secret)
+    except CreatorTokenError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    if task_store.is_creator_revoked(payload.creator_id):
+        raise HTTPException(401, "session revoked")
+    try:
+        return task_store.get_creator_invoices(payload.creator_id)
+    except CreatorNotFoundError as exc:
+        raise HTTPException(404, f"creator not found: {payload.creator_id}") from exc

@@ -67,6 +67,26 @@ export interface ReminderEscalationResponse {
   items: ReminderEscalation[];
 }
 
+export interface CreatorInvoiceItem {
+  invoice_id: string;
+  amount_due: number;
+  amount_paid: number;
+  balance_due: number;
+  due_date: string;
+  status: "open" | "partial" | "paid" | "overdue" | "escalated";
+  dispatch_id: string;
+  dispatched_at: string;
+  notification_state: "unseen" | "seen_unfulfilled" | "fulfilled";
+  reminder_count: number;
+  last_reminder_at: string | null;
+}
+
+export interface CreatorInvoicesResponse {
+  creator_id: string;
+  creator_name: string;
+  invoices: CreatorInvoiceItem[];
+}
+
 const API_BASE_URL = process.env.INVOICING_API_BASE_URL ?? "http://localhost:8000";
 
 async function decodeJson<T>(response: Response, operation: string): Promise<T> {
@@ -118,4 +138,131 @@ export async function runReminderCycle(payload: ReminderRunRequest = {}): Promis
   });
 
   return decodeJson<ReminderRunResponse>(response, "Reminder run");
+}
+
+export async function getCreatorInvoices(token: string): Promise<CreatorInvoicesResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/creator/${encodeURIComponent(token)}/invoices`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+
+  return decodeJson<CreatorInvoicesResponse>(response, "Creator invoices");
+}
+
+// --- Passkey Auth (server-side → backend) ---
+
+export async function backendLookupPasskey(passkey: string): Promise<{ creator_id: string; creator_name: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/auth/lookup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passkey }),
+    cache: "no-store",
+  });
+  return decodeJson(response, "Passkey lookup");
+}
+
+export async function backendConfirmPasskey(passkey: string): Promise<{
+  creator_id: string;
+  creator_name: string;
+  session_token: string;
+  expires_at: string;
+}> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/auth/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passkey }),
+    cache: "no-store",
+  });
+  return decodeJson(response, "Passkey confirm");
+}
+
+// --- Admin Auth (server-side → backend) ---
+
+export async function backendAdminLogin(password: string): Promise<{
+  authenticated: boolean;
+  session_token: string;
+  expires_at: string;
+}> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/admin/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+    cache: "no-store",
+  });
+  return decodeJson(response, "Admin login");
+}
+
+// --- Session-based Creator Data ---
+
+export async function getCreatorInvoicesBySession(sessionToken: string): Promise<CreatorInvoicesResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/me/invoices`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${sessionToken}`,
+    },
+    cache: "no-store",
+  });
+  return decodeJson(response, "Creator invoices (session)");
+}
+
+// --- Passkey Management (admin-only) ---
+
+export async function generatePasskey(
+  creatorId: string,
+  creatorName: string,
+  adminToken: string,
+): Promise<{
+  creator_id: string;
+  creator_name: string;
+  passkey: string;
+  display_prefix: string;
+  created_at: string;
+}> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/passkeys/generate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    body: JSON.stringify({ creator_id: creatorId, creator_name: creatorName }),
+    cache: "no-store",
+  });
+  return decodeJson(response, "Generate passkey");
+}
+
+export interface PasskeyListItem {
+  creator_id: string;
+  creator_name: string;
+  display_prefix: string;
+  created_at: string;
+}
+
+export async function listPasskeys(adminToken: string): Promise<{ creators: PasskeyListItem[] }> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/passkeys`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    cache: "no-store",
+  });
+  return decodeJson(response, "List passkeys");
+}
+
+export async function revokePasskey(
+  creatorId: string,
+  adminToken: string,
+): Promise<{ creator_id: string; revoked: boolean }> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/passkeys/revoke`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    body: JSON.stringify({ creator_id: creatorId }),
+    cache: "no-store",
+  });
+  return decodeJson(response, "Revoke passkey");
 }

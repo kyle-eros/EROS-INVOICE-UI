@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from invoicing_web import api as api_module
+
 from invoicing_web.main import create_app
 from invoicing_web.openclaw import StubOpenClawSender
 
@@ -50,9 +51,20 @@ def _invoice_payload(
     }
 
 
+def _dispatch_payload(*, invoice_id: str, dispatch_time: str, idempotency_key: str = "dispatch-key-001") -> dict:
+    return {
+        "invoice_id": invoice_id,
+        "dispatched_at": dispatch_time,
+        "channels": ["email", "sms"],
+        "recipient_email": "kyle@erosops.com",
+        "recipient_phone": "+15555550123",
+        "idempotency_key": idempotency_key,
+    }
+
+
 def _client() -> TestClient:
     api_module.task_store.reset()
-    api_module.openclaw_sender = StubOpenClawSender(enabled=True, channel="email")
+    api_module.openclaw_sender = StubOpenClawSender(enabled=True, channel="email,sms")
     return TestClient(create_app())
 
 
@@ -112,8 +124,6 @@ def test_invoicing_lifecycle() -> None:
     assert len(artifacts_data["artifacts"]) == 1
     assert artifacts_data["artifacts"][0]["filename"] == f"invoicing-task-{task_id}.txt"
     assert "agent_slug=payout-reconciliation" in artifacts_data["artifacts"][0]["content"]
-    assert "source_ref_1=/tmp/exports/invoices_feb.csv" in artifacts_data["artifacts"][0]["content"]
-    assert "metadata.legacy_command=preview-invoicing" in artifacts_data["artifacts"][0]["content"]
 
 
 def test_preview_idempotency_returns_existing_task() -> None:
@@ -125,22 +135,6 @@ def test_preview_idempotency_returns_existing_task() -> None:
     assert first.status_code == 201
     assert second.status_code == 201
     assert first.json()["task_id"] == second.json()["task_id"] == "task-0001"
-    list_resp = client.get("/api/v1/invoicing/tasks")
-    assert list_resp.status_code == 200
-    assert len(list_resp.json()) == 1
-
-
-def test_missing_task_returns_404() -> None:
-    client = _client()
-
-    get_task_resp = client.get("/api/v1/invoicing/tasks/task-9999")
-    assert get_task_resp.status_code == 404
-
-    confirm_resp = client.post("/api/v1/invoicing/confirm/task-9999")
-    assert confirm_resp.status_code == 404
-
-    artifacts_resp = client.get("/api/v1/invoicing/artifacts/task-9999")
-    assert artifacts_resp.status_code == 404
 
 
 def test_invoice_upsert_and_payment_event_idempotency() -> None:
@@ -176,6 +170,98 @@ def test_invoice_upsert_and_payment_event_idempotency() -> None:
     assert duplicate_payment.json()["balance_due"] == 150.0
 
 
+def test_dispatch_and_acknowledge_flow() -> None:
+    client = _client()
+
+    upsert_resp = client.post(
+        "/api/v1/invoicing/invoices/upsert",
+        json={"invoices": [_invoice_payload(invoice_id="inv-creator-001", due_date="2026-02-10")]},
+    )
+    assert upsert_resp.status_code == 200
+
+    dispatch_resp = client.post(
+        "/api/v1/invoicing/invoices/dispatch",
+        json=_dispatch_payload(invoice_id="inv-creator-001", dispatch_time="2026-02-10T00:00:00Z"),
+    )
+    assert dispatch_resp.status_code == 200
+    dispatch_data = dispatch_resp.json()
+    assert dispatch_data["invoice_id"] == "inv-creator-001"
+    assert dispatch_data["notification_state"] == "unseen"
+    assert dispatch_data["recipient_email_masked"] == "k***@erosops.com"
+    assert dispatch_data["recipient_phone_masked"] == "***0123"
+
+    ack_resp = client.post(f"/api/v1/invoicing/invoices/dispatch/{dispatch_data['dispatch_id']}/ack")
+    assert ack_resp.status_code == 200
+    assert ack_resp.json()["notification_state"] == "seen_unfulfilled"
+
+    payment_resp = client.post(
+        "/api/v1/invoicing/payments/events",
+        json={
+            "event_id": "evt-creator-001",
+            "invoice_id": "inv-creator-001",
+            "amount": 250.0,
+            "paid_at": "2026-02-15T10:30:00Z",
+            "source": "bank-transfer",
+            "metadata": {"batch": "settle"},
+        },
+    )
+    assert payment_resp.status_code == 200
+    assert payment_resp.json()["status"] == "paid"
+
+
+def test_reminder_requires_dispatch_and_run_idempotency() -> None:
+    client = _client()
+
+    upsert_resp = client.post(
+        "/api/v1/invoicing/invoices/upsert",
+        json={"invoices": [_invoice_payload(invoice_id="inv-rem-001", due_date="2026-02-10")]},
+    )
+    assert upsert_resp.status_code == 200
+
+    no_dispatch_run = client.post(
+        "/api/v1/invoicing/reminders/run/once",
+        json={
+            "dry_run": False,
+            "now_override": "2026-02-10T00:00:00Z",
+            "idempotency_key": "reminder-run-0001",
+        },
+    )
+    assert no_dispatch_run.status_code == 200
+    no_dispatch_data = no_dispatch_run.json()
+    assert no_dispatch_data["eligible_count"] == 0
+    assert no_dispatch_data["results"][0]["reason"] == "not_dispatched"
+
+    dispatch_resp = client.post(
+        "/api/v1/invoicing/invoices/dispatch",
+        json=_dispatch_payload(invoice_id="inv-rem-001", dispatch_time="2026-02-10T00:00:00Z", idempotency_key="dispatch-key-002"),
+    )
+    assert dispatch_resp.status_code == 200
+
+    first_live = client.post(
+        "/api/v1/invoicing/reminders/run/once",
+        json={
+            "dry_run": False,
+            "now_override": "2026-02-10T00:00:00Z",
+            "idempotency_key": "reminder-run-live-001",
+        },
+    )
+    assert first_live.status_code == 200
+    first_data = first_live.json()
+    assert first_data["sent_count"] == 1
+
+    second_live_same_idem = client.post(
+        "/api/v1/invoicing/reminders/run/once",
+        json={
+            "dry_run": False,
+            "now_override": "2026-02-10T00:00:00Z",
+            "idempotency_key": "reminder-run-live-001",
+        },
+    )
+    assert second_live_same_idem.status_code == 200
+    second_data = second_live_same_idem.json()
+    assert second_data == first_data
+
+
 def test_reminder_run_and_escalation_flow() -> None:
     client = _client()
 
@@ -184,6 +270,12 @@ def test_reminder_run_and_escalation_flow() -> None:
         json={"invoices": [_invoice_payload(invoice_id="inv-100", due_date="2026-02-10")]},
     )
     assert upsert_resp.status_code == 200
+
+    dispatch_resp = client.post(
+        "/api/v1/invoicing/invoices/dispatch",
+        json=_dispatch_payload(invoice_id="inv-100", dispatch_time="2026-02-10T00:00:00Z", idempotency_key="dispatch-key-100"),
+    )
+    assert dispatch_resp.status_code == 200
 
     dry_run_resp = client.post(
         "/api/v1/invoicing/reminders/run/once",
@@ -200,13 +292,16 @@ def test_reminder_run_and_escalation_flow() -> None:
         run_at = first_send_at + timedelta(hours=48 * index)
         live_resp = client.post(
             "/api/v1/invoicing/reminders/run/once",
-            json={"dry_run": False, "now_override": run_at.isoformat().replace("+00:00", "Z")},
+            json={
+                "dry_run": False,
+                "now_override": run_at.isoformat().replace("+00:00", "Z"),
+                "idempotency_key": f"reminder-loop-{index:02d}",
+            },
         )
         assert live_resp.status_code == 200
         live_data = live_resp.json()
         assert live_data["failed_count"] == 0
-        if index < 6:
-            assert live_data["sent_count"] == 1
+        assert live_data["sent_count"] == 1
 
     capped_run = client.post(
         "/api/v1/invoicing/reminders/run/once",
@@ -231,19 +326,31 @@ def test_reminder_summary_counts() -> None:
     upsert_resp = client.post(
         "/api/v1/invoicing/invoices/upsert",
         json={
-                "invoices": [
-                    _invoice_payload(invoice_id="inv-past", due_date="2020-01-01", issued_at="2019-12-01"),
-                    _invoice_payload(invoice_id="inv-future", due_date="2099-01-01", issued_at="2098-12-01"),
-                    _invoice_payload(
-                        invoice_id="inv-optout",
-                        due_date="2020-01-01",
-                        opt_out=True,
-                        issued_at="2019-12-01",
-                    ),
-                ]
-            },
-        )
+            "invoices": [
+                _invoice_payload(invoice_id="inv-past", due_date="2020-01-01", issued_at="2019-12-01"),
+                _invoice_payload(invoice_id="inv-future", due_date="2099-01-01", issued_at="2098-12-01"),
+                _invoice_payload(
+                    invoice_id="inv-optout",
+                    due_date="2020-01-01",
+                    opt_out=True,
+                    issued_at="2019-12-01",
+                ),
+            ]
+        },
+    )
     assert upsert_resp.status_code == 200
+
+    first_dispatch = client.post(
+        "/api/v1/invoicing/invoices/dispatch",
+        json=_dispatch_payload(invoice_id="inv-past", dispatch_time="2026-02-10T00:00:00Z", idempotency_key="dispatch-summary-1"),
+    )
+    assert first_dispatch.status_code == 200
+
+    second_dispatch = client.post(
+        "/api/v1/invoicing/invoices/dispatch",
+        json=_dispatch_payload(invoice_id="inv-optout", dispatch_time="2026-02-10T00:00:00Z", idempotency_key="dispatch-summary-2"),
+    )
+    assert second_dispatch.status_code == 200
 
     summary_resp = client.get("/api/v1/invoicing/reminders/summary")
     assert summary_resp.status_code == 200

@@ -21,9 +21,16 @@ class Settings:
     api_prefix: str = "/api/v1"
     openclaw_enabled: bool = False
     openclaw_dry_run_default: bool = True
-    openclaw_channel: str = "email"
+    openclaw_channel: str = "email,sms"
     openclaw_api_base_url: str = ""
     openclaw_api_key: str = ""
+    creator_magic_link_secret: str = "dev-creator-secret"
+    creator_portal_base_url: str = "http://localhost:3000/creator"
+    admin_password: str = ""
+    admin_session_secret: str = "dev-admin-secret"
+    creator_session_secret: str = "dev-session-secret"
+    creator_session_ttl_minutes: int = 120
+    cookie_secure: bool = True
 
 
 def get_settings() -> Settings:
@@ -32,7 +39,14 @@ def get_settings() -> Settings:
         api_prefix=os.getenv("INVOICING_API_PREFIX", "/api/v1"),
         openclaw_enabled=_as_bool(os.getenv("OPENCLAW_ENABLED"), False),
         openclaw_dry_run_default=_as_bool(os.getenv("OPENCLAW_DRY_RUN_DEFAULT"), True),
-        openclaw_channel=os.getenv("OPENCLAW_CHANNEL", "email"),
+        openclaw_channel=os.getenv("OPENCLAW_CHANNEL", "email,sms"),
         openclaw_api_base_url=os.getenv("OPENCLAW_API_BASE_URL", ""),
         openclaw_api_key=os.getenv("OPENCLAW_API_KEY", ""),
+        creator_magic_link_secret=os.getenv("CREATOR_MAGIC_LINK_SECRET", "dev-creator-secret"),
+        creator_portal_base_url=os.getenv("CREATOR_PORTAL_BASE_URL", "http://localhost:3000/creator"),
+        admin_password=os.getenv("ADMIN_PASSWORD", ""),
+        admin_session_secret=os.getenv("ADMIN_SESSION_SECRET", "dev-admin-secret"),
+        creator_session_secret=os.getenv("CREATOR_SESSION_SECRET", "dev-session-secret"),
+        creator_session_ttl_minutes=int(os.getenv("CREATOR_SESSION_TTL_MINUTES", "120")),
+        cookie_secure=_as_bool(os.getenv("COOKIE_SECURE"), True),
     )

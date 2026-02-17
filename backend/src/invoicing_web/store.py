@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import secrets
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from itertools import count
 from threading import Lock
@@ -9,15 +11,22 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .models import (
     Artifact,
     ArtifactListResponse,
+    CreatorDispatchAcknowledgeResponse,
+    CreatorInvoiceItem,
+    CreatorInvoicesResponse,
     EscalationItem,
+    InvoiceDispatchRequest,
+    InvoiceDispatchResponse,
     InvoiceRecord,
     InvoiceUpsertRequest,
     PaymentEventRequest,
     PaymentEventResponse,
     PreviewRequest,
+    ReminderChannelResult,
     ReminderResult,
     ReminderRunRequest,
     ReminderRunResponse,
+    ReminderStatus,
     ReminderSummaryResponse,
     TaskDetail,
     TaskSummary,
@@ -34,6 +43,27 @@ class TaskNotFoundError(KeyError):
 
 class InvoiceNotFoundError(KeyError):
     """Raised when an operation references an invoice id that does not exist."""
+
+
+class DispatchNotFoundError(KeyError):
+    """Raised when a dispatch id does not exist."""
+
+
+class CreatorNotFoundError(KeyError):
+    """Raised when a creator id is not present in invoice records."""
+
+
+RATE_LIMIT_MAX_ATTEMPTS = 5
+RATE_LIMIT_WINDOW = timedelta(minutes=15)
+
+
+@dataclass
+class _PasskeyRecord:
+    creator_id: str
+    creator_name: str
+    passkey_hash: str
+    display_prefix: str
+    created_at: datetime
 
 
 @dataclass
@@ -62,9 +92,25 @@ class _InvoiceRecord:
     status: str
     opt_out: bool
     reminder_count: int
+    dispatch_id: str | None
+    dispatched_at: datetime | None
+    notification_state: str
     last_payment_at: datetime | None
     last_reminder_at: datetime | None
     updated_at: datetime
+
+
+@dataclass
+class _DispatchRecord:
+    dispatch_id: str
+    invoice_id: str
+    creator_id: str
+    channels: list[str]
+    recipient_email: str | None
+    recipient_phone: str | None
+    creator_portal_url: str | None
+    dispatched_at: datetime
+    idempotency_key: str | None
 
 
 @dataclass
@@ -94,9 +140,20 @@ class InMemoryTaskStore:
         self._idempotency_index: dict[str, str] = {}
 
         self._invoices: dict[str, _InvoiceRecord] = {}
+        self._dispatch_counter = count(1)
+        self._dispatches: dict[str, _DispatchRecord] = {}
+        self._dispatch_by_invoice: dict[str, str] = {}
+        self._dispatch_idempotency: dict[str, str] = {}
+
         self._payment_event_index: set[str] = set()
         self._reminder_logs: list[ReminderResult] = []
         self._last_reminder_run: _ReminderRunSnapshot | None = None
+        self._reminder_run_idempotency: dict[str, ReminderRunResponse] = {}
+
+        self._passkeys: dict[str, _PasskeyRecord] = {}
+        self._passkey_hash_index: dict[str, str] = {}
+        self._revoked_creators: set[str] = set()
+        self._login_attempts: dict[str, list[datetime]] = {}
 
     def reset(self) -> None:
         with self._lock:
@@ -106,9 +163,84 @@ class InMemoryTaskStore:
             self._idempotency_index.clear()
 
             self._invoices.clear()
+            self._dispatch_counter = count(1)
+            self._dispatches.clear()
+            self._dispatch_by_invoice.clear()
+            self._dispatch_idempotency.clear()
+
             self._payment_event_index.clear()
             self._reminder_logs.clear()
             self._last_reminder_run = None
+            self._reminder_run_idempotency.clear()
+
+            self._passkeys.clear()
+            self._passkey_hash_index.clear()
+            self._revoked_creators.clear()
+            self._login_attempts.clear()
+
+    def generate_passkey(self, creator_id: str, creator_name: str) -> tuple[_PasskeyRecord, str]:
+        with self._lock:
+            raw_passkey = secrets.token_urlsafe(32)
+            passkey_hash = hashlib.sha256(raw_passkey.encode("utf-8")).hexdigest()
+            display_prefix = raw_passkey[:6]
+            now = datetime.now(timezone.utc)
+
+            old_record = self._passkeys.get(creator_id)
+            if old_record is not None:
+                self._passkey_hash_index.pop(old_record.passkey_hash, None)
+
+            record = _PasskeyRecord(
+                creator_id=creator_id,
+                creator_name=creator_name,
+                passkey_hash=passkey_hash,
+                display_prefix=display_prefix,
+                created_at=now,
+            )
+            self._passkeys[creator_id] = record
+            self._passkey_hash_index[passkey_hash] = creator_id
+            self._revoked_creators.discard(creator_id)
+            return record, raw_passkey
+
+    def lookup_by_passkey(self, raw_passkey: str) -> _PasskeyRecord | None:
+        with self._lock:
+            passkey_hash = hashlib.sha256(raw_passkey.encode("utf-8")).hexdigest()
+            creator_id = self._passkey_hash_index.get(passkey_hash)
+            if creator_id is None:
+                return None
+            return self._passkeys.get(creator_id)
+
+    def revoke_passkey(self, creator_id: str) -> bool:
+        with self._lock:
+            record = self._passkeys.pop(creator_id, None)
+            if record is None:
+                return False
+            self._passkey_hash_index.pop(record.passkey_hash, None)
+            self._revoked_creators.add(creator_id)
+            return True
+
+    def list_passkeys(self) -> list[_PasskeyRecord]:
+        with self._lock:
+            return list(self._passkeys.values())
+
+    def is_creator_revoked(self, creator_id: str) -> bool:
+        with self._lock:
+            return creator_id in self._revoked_creators
+
+    def check_rate_limit(self, client_ip: str) -> bool:
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            cutoff = now - RATE_LIMIT_WINDOW
+            attempts = self._login_attempts.get(client_ip, [])
+            recent = [ts for ts in attempts if ts > cutoff]
+            self._login_attempts[client_ip] = recent
+            return len(recent) < RATE_LIMIT_MAX_ATTEMPTS
+
+    def record_failed_attempt(self, client_ip: str) -> None:
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            if client_ip not in self._login_attempts:
+                self._login_attempts[client_ip] = []
+            self._login_attempts[client_ip].append(now)
 
     def create_preview(self, payload: PreviewRequest) -> _TaskRecord:
         with self._lock:
@@ -178,6 +310,10 @@ class InMemoryTaskStore:
                 artifacts=list(self._artifacts.get(task_id, [])),
             )
 
+    def creator_exists(self, creator_id: str) -> bool:
+        with self._lock:
+            return any(record.creator_id == creator_id for record in self._invoices.values())
+
     def upsert_invoices(self, payload: InvoiceUpsertRequest) -> list[InvoiceRecord]:
         now = datetime.now(timezone.utc)
         upserted: list[InvoiceRecord] = []
@@ -202,6 +338,9 @@ class InMemoryTaskStore:
                         status="open",
                         opt_out=item.opt_out,
                         reminder_count=0,
+                        dispatch_id=None,
+                        dispatched_at=None,
+                        notification_state="unseen",
                         last_payment_at=None,
                         last_reminder_at=None,
                         updated_at=now,
@@ -223,6 +362,7 @@ class InMemoryTaskStore:
                     record.updated_at = now
 
                 self._refresh_invoice_status(record, now)
+                self._refresh_invoice_notification(record)
                 upserted.append(self._to_invoice_record(record))
 
         return upserted
@@ -233,7 +373,121 @@ class InMemoryTaskStore:
             records = sorted(self._invoices.values(), key=lambda value: (value.due_date, value.invoice_id))
             for record in records:
                 self._refresh_invoice_status(record, now)
+                self._refresh_invoice_notification(record)
             return [self._to_invoice_record(record) for record in records]
+
+    def dispatch_invoice(self, payload: InvoiceDispatchRequest) -> InvoiceDispatchResponse:
+        with self._lock:
+            now = payload.dispatched_at or datetime.now(timezone.utc)
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            else:
+                now = now.astimezone(timezone.utc)
+
+            record = self._invoices.get(payload.invoice_id)
+            if record is None:
+                raise InvoiceNotFoundError(payload.invoice_id)
+
+            idem = payload.idempotency_key
+            if idem and idem in self._dispatch_idempotency:
+                existing_dispatch_id = self._dispatch_idempotency[idem]
+                existing_dispatch = self._dispatches[existing_dispatch_id]
+                return self._to_dispatch_response(existing_dispatch, record.notification_state)
+
+            existing_dispatch_id = self._dispatch_by_invoice.get(payload.invoice_id)
+            if existing_dispatch_id:
+                existing_dispatch = self._dispatches[existing_dispatch_id]
+                if idem:
+                    self._dispatch_idempotency[idem] = existing_dispatch_id
+                return self._to_dispatch_response(existing_dispatch, record.notification_state)
+
+            dispatch_id = f"dispatch-{next(self._dispatch_counter):04d}"
+            dispatch = _DispatchRecord(
+                dispatch_id=dispatch_id,
+                invoice_id=payload.invoice_id,
+                creator_id=record.creator_id,
+                channels=list(payload.channels),
+                recipient_email=payload.recipient_email,
+                recipient_phone=payload.recipient_phone,
+                creator_portal_url=payload.creator_portal_url,
+                dispatched_at=now,
+                idempotency_key=idem,
+            )
+            self._dispatches[dispatch_id] = dispatch
+            self._dispatch_by_invoice[payload.invoice_id] = dispatch_id
+            if idem:
+                self._dispatch_idempotency[idem] = dispatch_id
+
+            record.dispatch_id = dispatch_id
+            record.dispatched_at = now
+            record.updated_at = now
+            self._refresh_invoice_status(record, now)
+            self._refresh_invoice_notification(record)
+
+            return self._to_dispatch_response(dispatch, record.notification_state)
+
+    def acknowledge_dispatch(self, dispatch_id: str) -> CreatorDispatchAcknowledgeResponse:
+        with self._lock:
+            dispatch = self._dispatches.get(dispatch_id)
+            if dispatch is None:
+                raise DispatchNotFoundError(dispatch_id)
+
+            record = self._invoices.get(dispatch.invoice_id)
+            if record is None:
+                raise InvoiceNotFoundError(dispatch.invoice_id)
+
+            acknowledged_at = datetime.now(timezone.utc)
+            self._refresh_invoice_status(record, acknowledged_at)
+            if record.balance_due <= 0:
+                record.notification_state = "fulfilled"
+            else:
+                record.notification_state = "seen_unfulfilled"
+            record.updated_at = acknowledged_at
+
+            return CreatorDispatchAcknowledgeResponse(
+                dispatch_id=dispatch.dispatch_id,
+                invoice_id=record.invoice_id,
+                creator_id=record.creator_id,
+                notification_state=record.notification_state,
+                acknowledged_at=acknowledged_at,
+            )
+
+    def get_creator_invoices(self, creator_id: str) -> CreatorInvoicesResponse:
+        with self._lock:
+            records = [
+                record
+                for record in self._invoices.values()
+                if record.creator_id == creator_id and record.dispatch_id is not None
+            ]
+            if not records:
+                raise CreatorNotFoundError(creator_id)
+
+            now = datetime.now(timezone.utc)
+            records.sort(key=lambda value: (value.due_date, value.invoice_id))
+            items: list[CreatorInvoiceItem] = []
+            for record in records:
+                self._refresh_invoice_status(record, now)
+                self._refresh_invoice_notification(record)
+                if record.dispatch_id is None or record.dispatched_at is None:
+                    continue
+                items.append(
+                    CreatorInvoiceItem(
+                        invoice_id=record.invoice_id,
+                        amount_due=record.amount_due,
+                        amount_paid=record.amount_paid,
+                        balance_due=record.balance_due,
+                        due_date=record.due_date,
+                        status=record.status,
+                        dispatch_id=record.dispatch_id,
+                        dispatched_at=record.dispatched_at,
+                        notification_state=record.notification_state,
+                        reminder_count=record.reminder_count,
+                        last_reminder_at=record.last_reminder_at,
+                    )
+                )
+
+            creator_name = records[0].creator_name
+            return CreatorInvoicesResponse(creator_id=creator_id, creator_name=creator_name, invoices=items)
 
     def apply_payment_event(self, payload: PaymentEventRequest) -> PaymentEventResponse:
         now = datetime.now(timezone.utc)
@@ -245,6 +499,7 @@ class InMemoryTaskStore:
 
             if payload.event_id in self._payment_event_index:
                 self._refresh_invoice_status(record, now)
+                self._refresh_invoice_notification(record)
                 return PaymentEventResponse(
                     event_id=payload.event_id,
                     invoice_id=record.invoice_id,
@@ -260,6 +515,7 @@ class InMemoryTaskStore:
                 record.last_payment_at = payload.paid_at
             record.updated_at = now
             self._refresh_invoice_status(record, now)
+            self._refresh_invoice_notification(record)
 
             return PaymentEventResponse(
                 event_id=payload.event_id,
@@ -278,6 +534,7 @@ class InMemoryTaskStore:
 
             for record in self._invoices.values():
                 self._refresh_invoice_status(record, now)
+                self._refresh_invoice_notification(record)
                 if record.balance_due > 0:
                     unpaid_count += 1
                 if record.status in {"overdue", "escalated"} and record.balance_due > 0:
@@ -303,6 +560,9 @@ class InMemoryTaskStore:
 
     def run_reminders(self, payload: ReminderRunRequest, sender: OpenClawSender) -> ReminderRunResponse:
         with self._lock:
+            if payload.idempotency_key and payload.idempotency_key in self._reminder_run_idempotency:
+                return self._reminder_run_idempotency[payload.idempotency_key]
+
             now = payload.now_override or datetime.now(timezone.utc)
             if now.tzinfo is None:
                 now = now.replace(tzinfo=timezone.utc)
@@ -315,6 +575,7 @@ class InMemoryTaskStore:
 
             for record in records:
                 self._refresh_invoice_status(record, now)
+                self._refresh_invoice_notification(record)
                 decision = self._evaluate_reminder(record, now)
                 decisions.append((record, decision))
 
@@ -324,15 +585,18 @@ class InMemoryTaskStore:
             processed_eligible = 0
 
             for record, decision in decisions:
-                masked = mask_contact_target(record.contact_target, record.contact_channel)
+                dispatch = self._dispatches.get(record.dispatch_id or "") if record.dispatch_id else None
+                masked_targets = self._masked_dispatch_targets(dispatch)
 
                 if not decision.eligible:
                     skipped_result = ReminderResult(
                         invoice_id=record.invoice_id,
+                        dispatch_id=record.dispatch_id,
                         status="skipped",
                         reason=decision.reason,
                         next_eligible_at=decision.next_eligible_at,
-                        contact_target_masked=masked,
+                        contact_target_masked=masked_targets,
+                        idempotency_key=payload.idempotency_key,
                     )
                     results.append(skipped_result)
                     self._reminder_logs.append(skipped_result)
@@ -341,58 +605,103 @@ class InMemoryTaskStore:
                 if payload.limit is not None and processed_eligible >= payload.limit:
                     skipped_result = ReminderResult(
                         invoice_id=record.invoice_id,
+                        dispatch_id=record.dispatch_id,
                         status="skipped",
                         reason="limit_reached",
                         next_eligible_at=now + REMINDER_COOLDOWN,
-                        contact_target_masked=masked,
+                        contact_target_masked=masked_targets,
+                        idempotency_key=payload.idempotency_key,
                     )
                     results.append(skipped_result)
                     self._reminder_logs.append(skipped_result)
                     continue
 
                 processed_eligible += 1
-                provider_payload = ProviderSendRequest(
-                    invoice_id=record.invoice_id,
-                    creator_id=record.creator_id,
-                    creator_name=record.creator_name,
-                    contact_channel=record.contact_channel,
-                    contact_target=record.contact_target,
-                    currency=record.currency,
-                    amount_due=record.amount_due,
-                    balance_due=record.balance_due,
-                    due_date=record.due_date,
-                )
-                provider_result = sender.send_friendly_reminder(provider_payload, dry_run=payload.dry_run)
-                attempted_at = now
+                channel_results: list[ReminderChannelResult] = []
 
+                if dispatch is None:
+                    channel_results.append(
+                        ReminderChannelResult(
+                            channel="email",
+                            status="failed",
+                            error_code="dispatch_missing",
+                            error_message="Dispatch record missing for eligible invoice",
+                        )
+                    )
+                else:
+                    for channel in dispatch.channels:
+                        recipient = dispatch.recipient_email if channel == "email" else dispatch.recipient_phone
+                        if not recipient:
+                            channel_results.append(
+                                ReminderChannelResult(
+                                    channel=channel,
+                                    status="failed",
+                                    error_code="recipient_missing",
+                                    error_message=f"Recipient missing for channel {channel}",
+                                )
+                            )
+                            continue
+
+                        provider_payload = ProviderSendRequest(
+                            invoice_id=record.invoice_id,
+                            creator_id=record.creator_id,
+                            creator_name=record.creator_name,
+                            contact_channel=channel,
+                            contact_target=recipient,
+                            currency=record.currency,
+                            amount_due=record.amount_due,
+                            balance_due=record.balance_due,
+                            due_date=record.due_date,
+                        )
+                        provider_result = sender.send_friendly_reminder(provider_payload, dry_run=payload.dry_run)
+                        channel_results.append(
+                            ReminderChannelResult(
+                                channel=channel,
+                                status=provider_result.status,
+                                provider_message_id=provider_result.provider_message_id,
+                                error_code=provider_result.error_code,
+                                error_message=provider_result.error_message,
+                            )
+                        )
+
+                statuses = [result.status for result in channel_results]
+                attempted_at = now
+                summary_status: ReminderStatus
                 reason = "eligible"
-                reminder_status = "sent"
-                if provider_result.status == "sent":
+
+                if statuses and all(status == "dry_run" for status in statuses):
+                    summary_status = "dry_run"
+                    reason = "eligible_dry_run"
+                elif statuses and all(status == "sent" for status in statuses):
+                    summary_status = "sent"
                     sent_count += 1
                     record.reminder_count += 1
                     record.last_reminder_at = attempted_at
                     record.updated_at = attempted_at
                     self._refresh_invoice_status(record, attempted_at)
-                elif provider_result.status == "dry_run":
-                    reminder_status = "dry_run"
-                    reason = "eligible_dry_run"
+                    self._refresh_invoice_notification(record)
                 else:
+                    summary_status = "failed"
                     failed_count += 1
-                    reminder_status = "failed"
                     reason = "provider_error"
+
+                first_message_id = next((value.provider_message_id for value in channel_results if value.provider_message_id), None)
+                first_error_code = next((value.error_code for value in channel_results if value.error_code), None)
+                first_error_message = next((value.error_message for value in channel_results if value.error_message), None)
 
                 result = ReminderResult(
                     invoice_id=record.invoice_id,
-                    status=reminder_status,
+                    dispatch_id=record.dispatch_id,
+                    status=summary_status,
                     reason=reason,
                     attempted_at=attempted_at,
-                    provider_message_id=provider_result.provider_message_id,
-                    error_code=provider_result.error_code,
-                    error_message=provider_result.error_message,
-                    next_eligible_at=(attempted_at + REMINDER_COOLDOWN)
-                    if provider_result.status == "sent"
-                    else None,
-                    contact_target_masked=masked,
+                    provider_message_id=first_message_id,
+                    error_code=first_error_code,
+                    error_message=first_error_message,
+                    next_eligible_at=(attempted_at + REMINDER_COOLDOWN) if summary_status == "sent" else None,
+                    contact_target_masked=masked_targets,
+                    idempotency_key=payload.idempotency_key,
+                    channel_results=channel_results,
                 )
                 results.append(result)
                 self._reminder_logs.append(result)
@@ -407,7 +716,7 @@ class InMemoryTaskStore:
                 skipped_count=skipped_count,
             )
 
-            return ReminderRunResponse(
+            response = ReminderRunResponse(
                 run_at=now,
                 dry_run=payload.dry_run,
                 evaluated_count=len(records),
@@ -418,11 +727,26 @@ class InMemoryTaskStore:
                 escalated_count=escalated_count,
                 results=results,
             )
+            if payload.idempotency_key:
+                self._reminder_run_idempotency[payload.idempotency_key] = response
+            return response
 
     def list_escalations(self) -> list[EscalationItem]:
         with self._lock:
             now = datetime.now(timezone.utc)
             return self._current_escalations(now)
+
+    def _masked_dispatch_targets(self, dispatch: _DispatchRecord | None) -> str | None:
+        if dispatch is None:
+            return None
+        masked: list[str] = []
+        if dispatch.recipient_email:
+            masked.append(mask_contact_target(dispatch.recipient_email, "email"))
+        if dispatch.recipient_phone:
+            masked.append(mask_contact_target(dispatch.recipient_phone, "sms"))
+        if not masked:
+            return None
+        return ", ".join(masked)
 
     def _build_artifact(self, record: _TaskRecord) -> Artifact:
         payload = record.payload
@@ -477,6 +801,22 @@ class InMemoryTaskStore:
             updated_at=record.updated_at,
         )
 
+    def _to_dispatch_response(self, dispatch: _DispatchRecord, notification_state: str) -> InvoiceDispatchResponse:
+        email_masked = mask_contact_target(dispatch.recipient_email, "email") if dispatch.recipient_email else None
+        phone_masked = mask_contact_target(dispatch.recipient_phone, "sms") if dispatch.recipient_phone else None
+        return InvoiceDispatchResponse(
+            dispatch_id=dispatch.dispatch_id,
+            invoice_id=dispatch.invoice_id,
+            creator_id=dispatch.creator_id,
+            channels=list(dispatch.channels),
+            dispatched_at=dispatch.dispatched_at,
+            recipient_email_masked=email_masked,
+            recipient_phone_masked=phone_masked,
+            creator_portal_url=dispatch.creator_portal_url,
+            idempotency_key=dispatch.idempotency_key,
+            notification_state=notification_state,
+        )
+
     def _to_invoice_record(self, record: _InvoiceRecord) -> InvoiceRecord:
         return InvoiceRecord(
             invoice_id=record.invoice_id,
@@ -494,12 +834,18 @@ class InMemoryTaskStore:
             status=record.status,
             opt_out=record.opt_out,
             reminder_count=record.reminder_count,
+            dispatch_id=record.dispatch_id,
+            dispatched_at=record.dispatched_at,
+            notification_state=record.notification_state,
             last_payment_at=record.last_payment_at,
             last_reminder_at=record.last_reminder_at,
             updated_at=record.updated_at,
         )
 
     def _evaluate_reminder(self, record: _InvoiceRecord, now: datetime) -> _ReminderDecision:
+        if record.dispatch_id is None:
+            return _ReminderDecision(eligible=False, reason="not_dispatched")
+
         if record.opt_out:
             return _ReminderDecision(eligible=False, reason="opt_out")
 
@@ -525,6 +871,7 @@ class InMemoryTaskStore:
         escalations: list[EscalationItem] = []
         for record in sorted(self._invoices.values(), key=lambda value: (value.due_date, value.invoice_id)):
             self._refresh_invoice_status(record, now)
+            self._refresh_invoice_notification(record)
             if record.balance_due <= 0:
                 continue
             if record.reminder_count < REMINDER_MAX_ATTEMPTS:
@@ -545,6 +892,17 @@ class InMemoryTaskStore:
             )
 
         return escalations
+
+    def _refresh_invoice_notification(self, record: _InvoiceRecord) -> None:
+        if record.dispatch_id is None:
+            record.notification_state = "unseen"
+            return
+        if record.balance_due <= 0:
+            record.notification_state = "fulfilled"
+            return
+        if record.notification_state == "unseen":
+            return
+        record.notification_state = "seen_unfulfilled"
 
     def _refresh_invoice_status(self, record: _InvoiceRecord, now: datetime) -> None:
         if record.balance_due <= 0:

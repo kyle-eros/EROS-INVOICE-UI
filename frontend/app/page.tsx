@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { SurfaceCard } from "./components/SurfaceCard";
 
@@ -11,8 +12,13 @@ export default function HomePage() {
             <BrandWordmark size="lg" />
             <h1 className="home-hero__title">Your invoices, all in one place.</h1>
             <p className="kicker">
-              Check your balance, view your invoices, and confirm payments — all from the secure link sent to you.
+              Check your balance, view your invoices, and confirm payments — sign in with your passkey to get started.
             </p>
+            <div className="home-hero__actions">
+              <Link className="button-link" href="/login">
+                Sign In to Your Portal
+              </Link>
+            </div>
           </div>
         </header>
 
@@ -30,8 +36,9 @@ export default function HomePage() {
         <SurfaceCard as="section" className="home-trust-card reveal-item" data-delay="2">
           <h2>How do I access my invoices?</h2>
           <p>
-            You&apos;ll receive a secure link by email or text message. Click the link to view and manage your invoices.
-            Links expire for your security — if yours has expired, contact your agency for a new one.
+            Your agency will send you a passkey — a secure code you use to sign in to your portal.
+            Paste it on the sign-in page to view and manage your invoices. Your passkey stays the same
+            until your agency revokes it, so keep it somewhere safe.
           </p>
         </SurfaceCard>
       </div>

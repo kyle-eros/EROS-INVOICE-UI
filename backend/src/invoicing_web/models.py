@@ -17,6 +17,7 @@ FinancialAgentSlug = Literal[
 InvoiceStatus = Literal["open", "partial", "paid", "overdue", "escalated"]
 ContactChannel = Literal["email", "sms"]
 ReminderStatus = Literal["sent", "skipped", "failed", "dry_run"]
+NotificationState = Literal["unseen", "seen_unfulfilled", "fulfilled"]
 
 
 class PreviewRequest(BaseModel):
@@ -212,6 +213,9 @@ class InvoiceRecord(BaseModel):
     status: InvoiceStatus
     opt_out: bool
     reminder_count: int
+    dispatch_id: str | None = None
+    dispatched_at: datetime | None = None
+    notification_state: NotificationState
     last_payment_at: datetime | None = None
     last_reminder_at: datetime | None = None
     updated_at: datetime
@@ -220,6 +224,185 @@ class InvoiceRecord(BaseModel):
 class InvoiceUpsertResponse(BaseModel):
     processed_count: int
     invoices: list[InvoiceRecord]
+
+
+class InvoiceDispatchRequest(BaseModel):
+    invoice_id: str = Field(min_length=1, max_length=128)
+    dispatched_at: datetime | None = None
+    channels: list[ContactChannel] = Field(min_length=1, max_length=2)
+    recipient_email: str | None = Field(default=None, min_length=5, max_length=256)
+    recipient_phone: str | None = Field(default=None, min_length=7, max_length=32)
+    creator_portal_url: str | None = Field(default=None, max_length=2048)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+
+    @field_validator("invoice_id")
+    @classmethod
+    def _normalize_invoice_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("invoice_id cannot be blank")
+        return normalized
+
+    @field_validator("recipient_email")
+    @classmethod
+    def _normalize_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("recipient_phone")
+    @classmethod
+    def _normalize_phone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("creator_portal_url")
+    @classmethod
+    def _normalize_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("dispatched_at")
+    @classmethod
+    def _normalize_dispatched_at(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @field_validator("channels")
+    @classmethod
+    def _normalize_channels(cls, value: list[ContactChannel]) -> list[ContactChannel]:
+        deduped: list[ContactChannel] = []
+        seen: set[str] = set()
+        for channel in value:
+            if channel in seen:
+                continue
+            seen.add(channel)
+            deduped.append(channel)
+        return deduped
+
+    @model_validator(mode="after")
+    def _validate_recipients(self) -> InvoiceDispatchRequest:
+        if "email" in self.channels and not self.recipient_email:
+            raise ValueError("recipient_email is required when email channel is included")
+        if "sms" in self.channels and not self.recipient_phone:
+            raise ValueError("recipient_phone is required when sms channel is included")
+        return self
+
+
+class InvoiceDispatchResponse(BaseModel):
+    dispatch_id: str
+    invoice_id: str
+    creator_id: str
+    channels: list[ContactChannel]
+    dispatched_at: datetime
+    recipient_email_masked: str | None = None
+    recipient_phone_masked: str | None = None
+    creator_portal_url: str | None = None
+    idempotency_key: str | None = None
+    notification_state: NotificationState
+
+
+class PasskeyGenerateRequest(BaseModel):
+    creator_id: str = Field(min_length=1, max_length=128)
+    creator_name: str = Field(min_length=1, max_length=256)
+
+    @field_validator("creator_id", "creator_name")
+    @classmethod
+    def _normalize_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("text fields cannot be blank")
+        return normalized
+
+
+class PasskeyGenerateResponse(BaseModel):
+    creator_id: str
+    creator_name: str
+    passkey: str
+    display_prefix: str
+    created_at: datetime
+
+
+class PasskeyListItem(BaseModel):
+    creator_id: str
+    creator_name: str
+    display_prefix: str
+    created_at: datetime
+
+
+class PasskeyListResponse(BaseModel):
+    creators: list[PasskeyListItem]
+
+
+class PasskeyRevokeRequest(BaseModel):
+    creator_id: str = Field(min_length=1, max_length=128)
+
+
+class PasskeyRevokeResponse(BaseModel):
+    creator_id: str
+    revoked: bool
+
+
+class PasskeyLoginRequest(BaseModel):
+    passkey: str = Field(min_length=1)
+
+
+class PasskeyLookupResponse(BaseModel):
+    creator_id: str
+    creator_name: str
+
+
+class PasskeyConfirmResponse(BaseModel):
+    creator_id: str
+    creator_name: str
+    session_token: str
+    expires_at: datetime
+
+
+class AdminLoginRequest(BaseModel):
+    password: str = Field(min_length=1)
+
+
+class AdminLoginResponse(BaseModel):
+    authenticated: bool
+    session_token: str
+    expires_at: datetime
+
+
+class CreatorDispatchAcknowledgeResponse(BaseModel):
+    dispatch_id: str
+    invoice_id: str
+    creator_id: str
+    notification_state: NotificationState
+    acknowledged_at: datetime
+
+
+class CreatorInvoiceItem(BaseModel):
+    invoice_id: str
+    amount_due: float
+    amount_paid: float
+    balance_due: float
+    due_date: date
+    status: InvoiceStatus
+    dispatch_id: str
+    dispatched_at: datetime
+    notification_state: NotificationState
+    reminder_count: int
+    last_reminder_at: datetime | None = None
+
+
+class CreatorInvoicesResponse(BaseModel):
+    creator_id: str
+    creator_name: str
+    invoices: list[CreatorInvoiceItem]
 
 
 class PaymentEventRequest(BaseModel):
@@ -272,6 +455,7 @@ class ReminderRunRequest(BaseModel):
     dry_run: bool = True
     limit: int | None = Field(default=None, ge=1, le=500)
     now_override: datetime | None = None
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
 
     @field_validator("now_override")
     @classmethod
@@ -283,8 +467,17 @@ class ReminderRunRequest(BaseModel):
         return value.astimezone(timezone.utc)
 
 
+class ReminderChannelResult(BaseModel):
+    channel: ContactChannel
+    status: ReminderStatus
+    provider_message_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
 class ReminderResult(BaseModel):
     invoice_id: str
+    dispatch_id: str | None = None
     status: ReminderStatus
     reason: str
     attempted_at: datetime | None = None
@@ -293,6 +486,8 @@ class ReminderResult(BaseModel):
     error_message: str | None = None
     next_eligible_at: datetime | None = None
     contact_target_masked: str | None = None
+    idempotency_key: str | None = None
+    channel_results: list[ReminderChannelResult] = Field(default_factory=list)
 
 
 class ReminderRunResponse(BaseModel):
