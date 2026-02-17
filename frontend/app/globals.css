@@ -189,6 +189,8 @@ th {
 }
 
 .button-link {
+  appearance: none;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -216,6 +218,16 @@ th {
 
 .button-link:active {
   transform: translateY(0);
+}
+
+.button-link--secondary {
+  border-color: rgba(167, 157, 140, 0.5);
+  background: rgba(18, 23, 33, 0.95);
+  color: var(--text);
+}
+
+.button-link--secondary:hover {
+  border-color: var(--border-strong);
 }
 
 .section-stack {
@@ -326,6 +338,105 @@ th {
   font-size: 1.45rem;
 }
 
+.reminder-ops-card {
+  padding: var(--space-6);
+  display: grid;
+  gap: var(--space-4);
+}
+
+.reminder-ops-card__head {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.reminder-ops-card__head h2 {
+  font-size: 1.45rem;
+}
+
+.reminder-ops-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.reminder-run-banner {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-size: 0.9rem;
+}
+
+.reminder-run-banner--ok {
+  border-color: rgba(79, 178, 134, 0.45);
+  color: #d6f8e8;
+  background: rgba(79, 178, 134, 0.18);
+}
+
+.reminder-run-banner--error {
+  border-color: rgba(212, 106, 106, 0.5);
+  color: #ffd7d7;
+  background: rgba(212, 106, 106, 0.2);
+}
+
+.reminder-metric-grid {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.reminder-metric-card {
+  border: 1px solid rgba(228, 202, 160, 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(228, 202, 160, 0.06);
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.reminder-metric-card span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.reminder-metric-card strong {
+  color: var(--text-strong);
+  font-size: 1.5rem;
+  line-height: 1;
+  font-family: var(--font-display), "Bodoni MT", "Times New Roman", serif;
+}
+
+.escalation-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.escalation-list h3 {
+  font-size: 1.04rem;
+  color: var(--text-strong);
+}
+
+.escalation-list ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.escalation-list li {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto auto;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3);
+  border: 1px solid rgba(225, 184, 102, 0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(225, 184, 102, 0.08);
+  font-size: 0.9rem;
+}
+
 .task-id {
   color: var(--text-strong);
   font-weight: 600;
@@ -416,6 +527,15 @@ th {
   .invoicing-header {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .reminder-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .escalation-list li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+  }
 }
 
 @media (max-width: 768px) {
@@ -427,6 +547,14 @@ th {
   .invoicing-table-card,
   .alert-panel {
     padding: var(--space-4);
+  }
+
+  .reminder-ops-card {
+    padding: var(--space-4);
+  }
+
+  .reminder-metric-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .window-range {

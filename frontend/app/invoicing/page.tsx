@@ -1,10 +1,20 @@
+import { revalidatePath } from "next/cache";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { BrandWordmark } from "../components/BrandWordmark";
 import { DataTable, type DataColumn } from "../components/DataTable";
 import { EmptyState } from "../components/EmptyState";
 import { StatusBadge, type StatusTone } from "../components/StatusBadge";
 import { SurfaceCard } from "../components/SurfaceCard";
-import { listTasks, type TaskSummary } from "../../lib/api";
+import {
+  getReminderSummary,
+  listReminderEscalations,
+  listTasks,
+  runReminderCycle,
+  type ReminderEscalation,
+  type ReminderSummary,
+  type TaskSummary,
+} from "../../lib/api";
 
 const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -22,11 +32,36 @@ const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "UTC",
 });
 
+const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+});
+
 const STATUS_TONE: Record<TaskSummary["status"], StatusTone> = {
   previewed: "warning",
   confirmed: "brand",
   completed: "success",
 };
+
+interface InvoicingPageSearchParams {
+  reminderRun?: string;
+  mode?: string;
+}
+
+async function runRemindersAction(formData: FormData) {
+  "use server";
+
+  const mode = formData.get("mode") === "live" ? "live" : "dry";
+  try {
+    await runReminderCycle({ dry_run: mode !== "live" });
+    revalidatePath("/invoicing");
+    redirect(`/invoicing?reminderRun=success&mode=${mode}`);
+  } catch {
+    revalidatePath("/invoicing");
+    redirect(`/invoicing?reminderRun=error&mode=${mode}`);
+  }
+}
 
 function formatDate(value: string): string {
   const parsed = new Date(`${value}T00:00:00Z`);
@@ -38,6 +73,10 @@ function formatTimestamp(value: string): string {
   return Number.isNaN(parsed.getTime()) ? value : TIMESTAMP_FORMATTER.format(parsed);
 }
 
+function formatCurrency(amount: number): string {
+  return CURRENCY_FORMATTER.format(amount);
+}
+
 function getLatestTimestamp(tasks: TaskSummary[]): string | null {
   if (tasks.length === 0) {
     return null;
@@ -46,14 +85,44 @@ function getLatestTimestamp(tasks: TaskSummary[]): string | null {
   return tasks.reduce((latest, task) => (task.updated_at > latest ? task.updated_at : latest), tasks[0].updated_at);
 }
 
-export default async function InvoicingPage() {
+function runMessage(reminderRun: string | undefined, mode: string): string | null {
+  if (reminderRun === "success") {
+    return mode === "live" ? "Live reminder cycle completed." : "Dry-run reminder cycle completed.";
+  }
+  if (reminderRun === "error") {
+    return mode === "live" ? "Live reminder cycle failed." : "Dry-run reminder cycle failed.";
+  }
+  return null;
+}
+
+export default async function InvoicingPage({
+  searchParams,
+}: {
+  searchParams?: Promise<InvoicingPageSearchParams>;
+}) {
+  const resolvedSearchParams = (await searchParams) ?? {};
+  const reminderRunState = resolvedSearchParams.reminderRun;
+  const reminderRunMode = resolvedSearchParams.mode === "live" ? "live" : "dry";
+  const reminderRunText = runMessage(reminderRunState, reminderRunMode);
+
   let tasks: TaskSummary[] = [];
   let loadError: string | null = null;
+  let reminderSummary: ReminderSummary | null = null;
+  let reminderEscalations: ReminderEscalation[] = [];
+  let reminderError: string | null = null;
 
   try {
     tasks = await listTasks();
   } catch (error) {
     loadError = error instanceof Error ? error.message : "Unable to load tasks";
+  }
+
+  try {
+    const [summary, escalations] = await Promise.all([getReminderSummary(), listReminderEscalations()]);
+    reminderSummary = summary;
+    reminderEscalations = escalations.items;
+  } catch (error) {
+    reminderError = error instanceof Error ? error.message : "Unable to load reminder telemetry";
   }
 
   const latestTimestamp = getLatestTimestamp(tasks);
@@ -126,8 +195,83 @@ export default async function InvoicingPage() {
           </SurfaceCard>
         </header>
 
+        <SurfaceCard as="section" className="reminder-ops-card reveal-item" data-delay="1">
+          <div className="reminder-ops-card__head">
+            <h2>OpenClaw Reminder Ops</h2>
+            <p className="kicker">Monitor unpaid creator balances and run reminder cycles on demand.</p>
+          </div>
+
+          <div className="reminder-ops-card__actions">
+            <form action={runRemindersAction}>
+              <input type="hidden" name="mode" value="dry" />
+              <button type="submit" className="button-link">
+                Run Dry-Run Cycle
+              </button>
+            </form>
+            <form action={runRemindersAction}>
+              <input type="hidden" name="mode" value="live" />
+              <button type="submit" className="button-link button-link--secondary">
+                Run Live Cycle
+              </button>
+            </form>
+          </div>
+
+          {reminderRunText ? (
+            <p className={`reminder-run-banner ${reminderRunState === "success" ? "reminder-run-banner--ok" : "reminder-run-banner--error"}`}>
+              {reminderRunText}
+            </p>
+          ) : null}
+
+          {reminderError ? (
+            <p className="muted-small">Reminder telemetry unavailable: {reminderError}</p>
+          ) : reminderSummary ? (
+            <div className="reminder-metric-grid" aria-label="Reminder metrics">
+              <div className="reminder-metric-card">
+                <span>Unpaid</span>
+                <strong>{reminderSummary.unpaid_count}</strong>
+              </div>
+              <div className="reminder-metric-card">
+                <span>Overdue</span>
+                <strong>{reminderSummary.overdue_count}</strong>
+              </div>
+              <div className="reminder-metric-card">
+                <span>Eligible Now</span>
+                <strong>{reminderSummary.eligible_now_count}</strong>
+              </div>
+              <div className="reminder-metric-card">
+                <span>Escalated</span>
+                <strong>{reminderSummary.escalated_count}</strong>
+              </div>
+            </div>
+          ) : null}
+
+          {reminderSummary?.last_run_at ? (
+            <p className="muted-small">
+              Last run {formatTimestamp(reminderSummary.last_run_at)} ({reminderSummary.last_run_dry_run ? "dry-run" : "live"})
+            </p>
+          ) : null}
+
+          {reminderEscalations.length > 0 ? (
+            <div className="escalation-list" aria-label="Escalation queue">
+              <h3>Escalation Queue</h3>
+              <ul>
+                {reminderEscalations.slice(0, 5).map((item) => (
+                  <li key={item.invoice_id}>
+                    <span>{item.invoice_id}</span>
+                    <span>{item.creator_name}</span>
+                    <span>{formatCurrency(item.balance_due)}</span>
+                    <span>{item.reminder_count} reminders</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="muted-small">No invoices currently require escalation.</p>
+          )}
+        </SurfaceCard>
+
         {loadError ? (
-          <SurfaceCard as="section" className="alert-panel reveal-item" data-delay="1" role="alert" aria-live="assertive">
+          <SurfaceCard as="section" className="alert-panel reveal-item" data-delay="2" role="alert" aria-live="assertive">
             <h2>Unable to load task queue</h2>
             <p>
               The API returned an error while loading tasks. Try again after confirming backend availability.
@@ -139,7 +283,7 @@ export default async function InvoicingPage() {
             </Link>
           </SurfaceCard>
         ) : (
-          <SurfaceCard as="section" className="invoicing-table-card reveal-item" data-delay="1">
+          <SurfaceCard as="section" className="invoicing-table-card reveal-item" data-delay="2">
             <div className="invoicing-table-card__head">
               <h2>Current Tasks</h2>
               <p className="kicker">{latestTimestamp ? `Latest update ${formatTimestamp(latestTimestamp)}` : "No updates yet"}</p>

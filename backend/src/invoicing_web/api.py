@@ -6,17 +6,27 @@ from .config import get_settings
 from .models import (
     ArtifactListResponse,
     ConfirmResponse,
+    EscalationListResponse,
+    InvoiceUpsertRequest,
+    InvoiceUpsertResponse,
+    PaymentEventRequest,
+    PaymentEventResponse,
     PreviewRequest,
     PreviewResponse,
+    ReminderRunRequest,
+    ReminderRunResponse,
+    ReminderSummaryResponse,
     RunOnceResponse,
     TaskDetail,
     TaskSummary,
 )
-from .store import InMemoryTaskStore, TaskNotFoundError
+from .openclaw import StubOpenClawSender
+from .store import InMemoryTaskStore, InvoiceNotFoundError, TaskNotFoundError
 
 _settings = get_settings()
 router = APIRouter(prefix=f"{_settings.api_prefix}/invoicing", tags=["invoicing"])
 task_store = InMemoryTaskStore()
+openclaw_sender = StubOpenClawSender(enabled=_settings.openclaw_enabled, channel=_settings.openclaw_channel)
 
 
 @router.post("/preview", response_model=PreviewResponse, status_code=status.HTTP_201_CREATED)
@@ -68,3 +78,33 @@ def get_artifacts(task_id: str) -> ArtifactListResponse:
         return task_store.get_artifacts(task_id)
     except TaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"task not found: {task_id}") from exc
+
+
+@router.post("/invoices/upsert", response_model=InvoiceUpsertResponse)
+def upsert_invoices(payload: InvoiceUpsertRequest) -> InvoiceUpsertResponse:
+    records = task_store.upsert_invoices(payload)
+    return InvoiceUpsertResponse(processed_count=len(records), invoices=records)
+
+
+@router.post("/payments/events", response_model=PaymentEventResponse)
+def ingest_payment_event(payload: PaymentEventRequest) -> PaymentEventResponse:
+    try:
+        return task_store.apply_payment_event(payload)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"invoice not found: {payload.invoice_id}") from exc
+
+
+@router.get("/reminders/summary", response_model=ReminderSummaryResponse)
+def get_reminder_summary() -> ReminderSummaryResponse:
+    return task_store.get_reminder_summary()
+
+
+@router.post("/reminders/run/once", response_model=ReminderRunResponse)
+def run_reminders_once(payload: ReminderRunRequest | None = None) -> ReminderRunResponse:
+    request_payload = payload or ReminderRunRequest(dry_run=_settings.openclaw_dry_run_default)
+    return task_store.run_reminders(request_payload, openclaw_sender)
+
+
+@router.get("/reminders/escalations", response_model=EscalationListResponse)
+def get_reminder_escalations() -> EscalationListResponse:
+    return EscalationListResponse(items=task_store.list_escalations())
