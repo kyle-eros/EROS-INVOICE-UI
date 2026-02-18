@@ -156,12 +156,12 @@ export default function LoginPage() {
           <BrandWordmark size="lg" />
           <h1 className="auth-hero__title">Secure access to your creator finance portal.</h1>
           <p className="auth-hero__copy">
-            Use your agency-issued passkey to enter a secure workspace for invoices, balances, and due-date tracking.
+            Use the passkey we sent you to enter a secure workspace for invoices, balances, and due-date tracking.
           </p>
           <ul className="auth-hero__list" aria-label="Security highlights">
             <li>Signed session token with strict cookie controls</li>
             <li>Automated login throttling to block brute-force attempts</li>
-            <li>Immediate passkey revocation support by your agency</li>
+            <li>Immediate passkey revocation support from us</li>
           </ul>
         </header>
 
@@ -170,10 +170,10 @@ export default function LoginPage() {
             <form className="auth-form" onSubmit={handleLookupSubmit} noValidate aria-busy={loading}>
               <div className="auth-panel__head">
                 <h2 className="auth-panel__title">Sign In</h2>
-                <p className="auth-panel__subtitle">Paste the passkey you received from your agency.</p>
+                <p className="auth-panel__subtitle">Paste the passkey we sent you.</p>
               </div>
               <div className="auth-field">
-                <label htmlFor="creator-passkey">Agency passkey</label>
+                <label htmlFor="creator-passkey">Your passkey</label>
                 <input
                   className="auth-input"
                   id="creator-passkey"
@@ -258,7 +258,7 @@ export default function LoginPage() {
       </div>
 
       <footer className="auth-footer">
-        <span>Need help with access? Contact your agency operations lead for credential recovery.</span>
+        <span>Need help with access? Message us and we&apos;ll get you a new passkey.</span>
       </footer>
     </main>
   );

@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 
 export const metadata: Metadata = {
   title: "EROS Invoicing",
-  description: "View your invoices, check balances, and confirm payments through your secure portal link.",
+  description: "View your invoices, track balances and statuses, and download official invoice PDFs via your secure portal.",
   icons: {
     icon: [
       { url: "/brand/eros-symbol.svg", type: "image/svg+xml" },

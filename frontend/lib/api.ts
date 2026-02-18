@@ -38,9 +38,17 @@ export interface ReminderRunRequest {
   dry_run?: boolean;
   limit?: number;
   now_override?: string;
+  idempotency_key?: string;
+}
+
+export interface ReminderEvaluateRequest {
+  limit?: number;
+  now_override?: string;
+  idempotency_key?: string;
 }
 
 export interface ReminderRunResponse {
+  run_id: string | null;
   run_at: string;
   dry_run: boolean;
   evaluated_count: number;
@@ -67,11 +75,32 @@ export interface ReminderEscalationResponse {
   items: ReminderEscalation[];
 }
 
+export interface ConversationThreadItem {
+  thread_id: string;
+  channel: "email" | "sms" | "imessage";
+  external_contact_masked: string;
+  creator_id: string | null;
+  creator_name: string | null;
+  invoice_id: string | null;
+  status: "open" | "agent_paused" | "human_handoff" | "closed";
+  auto_reply_count: number;
+  last_message_preview: string | null;
+  last_inbound_at: string | null;
+  last_outbound_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationThreadListResponse {
+  items: ConversationThreadItem[];
+}
+
 export interface CreatorInvoiceItem {
   invoice_id: string;
   amount_due: number;
   amount_paid: number;
   balance_due: number;
+  currency: string;
   issued_at: string;
   due_date: string;
   status: "open" | "partial" | "paid" | "overdue" | "escalated";
@@ -159,38 +188,94 @@ export async function listTasks(): Promise<TaskSummary[]> {
   return decodeJson<TaskSummary[]>(response, "Task listing");
 }
 
-export async function getReminderSummary(): Promise<ReminderSummary> {
+export async function getReminderSummary(adminToken: string): Promise<ReminderSummary> {
   const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/reminders/summary`, {
     method: "GET",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
     cache: "no-store",
   });
 
   return decodeJson<ReminderSummary>(response, "Reminder summary");
 }
 
-export async function listReminderEscalations(): Promise<ReminderEscalationResponse> {
+export async function listReminderEscalations(adminToken: string): Promise<ReminderEscalationResponse> {
   const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/reminders/escalations`, {
     method: "GET",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
     cache: "no-store",
   });
 
   return decodeJson<ReminderEscalationResponse>(response, "Reminder escalations");
 }
 
-export async function runReminderCycle(payload: ReminderRunRequest = {}): Promise<ReminderRunResponse> {
+export async function listAdminConversations(adminToken: string): Promise<ConversationThreadListResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/admin/conversations`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    cache: "no-store",
+  });
+
+  return decodeJson<ConversationThreadListResponse>(response, "Conversation inbox");
+}
+
+export async function runReminderCycle(payload: ReminderRunRequest = {}, adminToken: string): Promise<ReminderRunResponse> {
   const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/reminders/run/once`, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
+      Authorization: `Bearer ${adminToken}`,
     },
     body: JSON.stringify(payload),
     cache: "no-store",
   });
 
   return decodeJson<ReminderRunResponse>(response, "Reminder run");
+}
+
+export async function evaluateReminderCycle(
+  payload: ReminderEvaluateRequest = {},
+  adminToken: string,
+): Promise<ReminderRunResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/reminders/evaluate`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+
+  return decodeJson<ReminderRunResponse>(response, "Reminder evaluation");
+}
+
+export async function sendReminderRun(
+  runId: string,
+  adminToken: string,
+  payload: { max_messages?: number } = {},
+): Promise<ReminderRunResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/reminders/runs/${encodeURIComponent(runId)}/send`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+  return decodeJson<ReminderRunResponse>(response, "Reminder send");
 }
 
 export async function getCreatorInvoices(token: string): Promise<CreatorInvoicesResponse> {

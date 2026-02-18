@@ -391,6 +391,34 @@ th {
   color: var(--text);
 }
 
+.invoice-summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.invoice-summary-item {
+  border: 1px solid rgba(123, 184, 244, 0.32);
+  border-radius: var(--radius-md);
+  background: rgba(123, 184, 244, 0.08);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.invoice-summary-item span {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.invoice-summary-item strong {
+  color: var(--text-strong);
+  font-size: 1rem;
+  line-height: 1.3;
+  font-family: var(--font-display), "Bodoni MT", "Times New Roman", serif;
+}
+
 .invoice-detail-meta p {
   margin: 0;
 }
@@ -424,6 +452,11 @@ th {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: rgba(11, 22, 38, 0.58);
+}
+
+.invoice-pdf-fallback {
+  color: var(--text-muted);
+  font-size: 0.88rem;
 }
 
 .reminder-ops-card {
@@ -672,6 +705,10 @@ th {
     padding: var(--space-4);
   }
 
+  .invoice-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .invoice-pdf-frame {
     min-height: 620px;
   }
@@ -687,6 +724,10 @@ th {
 
   .window-range__to {
     font-size: 0.68rem;
+  }
+
+  .invoice-summary-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

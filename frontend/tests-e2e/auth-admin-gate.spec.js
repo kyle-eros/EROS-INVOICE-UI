@@ -50,4 +50,30 @@ test.describe("Admin Gate", () => {
     await expect(page.locator("p.auth-feedback--error[role='alert']")).toContainText("Invalid password.");
     await expect(page).toHaveURL(/\/admin\/gate$/);
   });
+
+  test("shows one-time passkey flash without URL secret leakage", async ({ context, page }) => {
+    await context.addCookies([
+      {
+        name: "admin_session",
+        value: "test-admin-session",
+        url: "http://127.0.0.1:3100",
+      },
+    ]);
+
+    await page.route("**/api/admin/passkey-flash", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          creator_name: "Creator Prime",
+          passkey: "flash-passkey-001",
+        }),
+      });
+    });
+
+    await page.goto("/admin?passkeyGen=success");
+    await expect(page).toHaveURL(/\/admin\?passkeyGen=success$/);
+    await expect(page).not.toHaveURL(/generatedPasskey=/);
+    await expect(page.locator(".passkey-display")).toContainText("flash-passkey-001");
+  });
 });

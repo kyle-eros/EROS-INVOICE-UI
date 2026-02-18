@@ -12,7 +12,7 @@ export default function HomePage() {
             <BrandWordmark size="lg" />
             <h1 className="home-hero__title">Your invoices, all in one place.</h1>
             <p className="kicker">
-              Check your balance, view your invoices, and confirm payments — sign in with your passkey to get started.
+              Check your balance, review invoice details, and download official PDFs with your secure passkey.
             </p>
             <div className="home-hero__actions">
               <Link className="button-link" href="/login">
@@ -28,17 +28,18 @@ export default function HomePage() {
             <p>View all your outstanding invoices, amounts due, and payment due dates in one place.</p>
           </SurfaceCard>
           <SurfaceCard className="home-trust-card">
-            <h2>Confirm Your Payments</h2>
-            <p>Once you&apos;ve submitted payment, mark your invoice as paid right from your portal.</p>
+            <h2>Track Payment Progress</h2>
+            <p>See invoice status updates in one place, including open, overdue, partial, and paid states.</p>
           </SurfaceCard>
         </section>
 
         <SurfaceCard as="section" className="home-trust-card reveal-item" data-delay="2">
           <h2>How do I access my invoices?</h2>
           <p>
-            Your agency will send you a passkey — a secure code you use to sign in to your portal.
-            Paste it on the sign-in page to view and manage your invoices. Your passkey stays the same
-            until your agency revokes it, so keep it somewhere safe.
+            We&apos;ll send your passkey directly to you. This secure code is what you use to sign in to your portal.
+            Paste it on the sign-in page to view your invoices and download PDFs. You&apos;ll use this same passkey
+            each time you sign in. If you lose it or need a new one at any time, message us and we&apos;ll send a
+            replacement right away.
           </p>
         </SurfaceCard>
       </div>
