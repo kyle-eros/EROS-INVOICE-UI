@@ -6,7 +6,11 @@ from pathlib import Path
 from invoicing_web.cb_seed import (
     build_invoice_upsert_request,
     build_reconciliation_report,
+    compute_earnings_source_totals,
     default_creator_overrides,
+    parse_chaturbate_monthly_revenue,
+    parse_earnings_bundle,
+    parse_onlyfans_earnings,
     parse_creator_stats,
     parse_sales_sessions,
     resolve_creator_identity,
@@ -109,3 +113,65 @@ def test_invoice_derivation_and_reconciliation(tmp_path: Path) -> None:
     assert reconciliation["sales_total_usd"] == 765.65
     assert reconciliation["stats_total_usd"] == 765.65
     assert reconciliation["delta_usd"] == 0.0
+
+
+def test_parse_onlyfans_earnings_applies_overrides(tmp_path: Path) -> None:
+    onlyfans_path = tmp_path / "90-Onlyfans-Earnings - eros.csv"
+    headers = ["Date/Time", "Creator", "Total earnings Net"]
+    rows = [
+        ["2025-11-20 - 2026-02-17", "Grace Bennett Paid", "$8,410.11"],
+        ["2025-11-20 - 2026-02-17", "Oliva Hansley PAID", "$10,660.54"],
+    ]
+    _write_csv(onlyfans_path, headers, rows)
+
+    parsed = parse_onlyfans_earnings(onlyfans_path, overrides=default_creator_overrides())
+    assert len(parsed) == 2
+    assert parsed[0].source == "onlyfans_90d"
+    assert parsed[0].period_start.isoformat() == "2025-11-20"
+    assert parsed[0].period_end.isoformat() == "2026-02-17"
+    assert parsed[0].creator_name_normalized == "grace bennett"
+    assert parsed[1].creator_name_normalized == "olivia hansley paid"
+
+
+def test_parse_chaturbate_monthly_revenue_from_filename(tmp_path: Path) -> None:
+    monthly_path = tmp_path / "creator_monthly_revenue_2026-02.csv"
+    headers = ["Model Name", "Total Revenue USD"]
+    rows = [
+        ["Scarlet Grace", "7781.00"],
+        ["Grace Bennett", "4834.80"],
+    ]
+    _write_csv(monthly_path, headers, rows)
+
+    parsed = parse_chaturbate_monthly_revenue(monthly_path, overrides=default_creator_overrides())
+    assert len(parsed) == 2
+    assert parsed[0].source == "chaturbate_monthly"
+    assert parsed[0].source_window == "2026-02"
+    assert parsed[0].period_start.isoformat() == "2026-02-01"
+    assert parsed[0].period_end.isoformat() == "2026-02-28"
+    assert parsed[0].creator_name_normalized == "scarlett grace"
+
+
+def test_parse_earnings_bundle_and_totals(tmp_path: Path) -> None:
+    onlyfans_path = tmp_path / "90-Onlyfans-Earnings - eros.csv"
+    monthly_path = tmp_path / "creator_monthly_revenue_2026-01.csv"
+
+    _write_csv(
+        onlyfans_path,
+        ["Date/Time", "Creator", "Total earnings Net"],
+        [["2025-11-20 - 2026-02-17", "Grace Bennett", "$17010.49"]],
+    )
+    _write_csv(
+        monthly_path,
+        ["Model Name", "Total Revenue USD"],
+        [["Grace Bennett", "6570.85"]],
+    )
+
+    parsed = parse_earnings_bundle(
+        onlyfans_csv=onlyfans_path,
+        chaturbate_monthly_csvs=[monthly_path],
+        overrides=default_creator_overrides(),
+    )
+    totals = compute_earnings_source_totals(parsed)
+    assert len(parsed) == 2
+    assert totals["onlyfans_90d"] == 17010.49
+    assert totals["chaturbate_monthly"] == 6570.85

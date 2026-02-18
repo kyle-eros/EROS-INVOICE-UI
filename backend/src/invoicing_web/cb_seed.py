@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import re
 from collections import Counter
@@ -27,6 +28,18 @@ class SalesSession:
 class CreatorStatsRow:
     creator_name: str
     total_earnings_net: float | None
+
+
+@dataclass(frozen=True)
+class EarningsAggregateRow:
+    source: str
+    source_file: str
+    source_window: str
+    creator_name_raw: str
+    creator_name_normalized: str
+    amount_usd: float
+    period_start: date
+    period_end: date
 
 
 @dataclass(frozen=True)
@@ -64,6 +77,9 @@ def slugify(value: str) -> str:
 def default_creator_overrides() -> dict[str, str]:
     return {
         normalize_creator_name("Grace Bennett Paid"): normalize_creator_name("Grace Bennett"),
+        normalize_creator_name("Oliva Hansley PAID"): normalize_creator_name("Olivia Hansley PAID"),
+        normalize_creator_name("Scarlet Grace"): normalize_creator_name("Scarlett Grace"),
+        normalize_creator_name("Tessatan FREE"): normalize_creator_name("Tessa Tan FREE"),
     }
 
 
@@ -162,6 +178,106 @@ def parse_creator_stats(path: Path) -> list[CreatorStatsRow]:
             )
         )
     return stats_rows
+
+
+def parse_onlyfans_earnings(path: Path, *, overrides: dict[str, str] | None = None) -> list[EarningsAggregateRow]:
+    resolved_overrides = overrides or {}
+    rows_out: list[EarningsAggregateRow] = []
+
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+
+    for row in rows:
+        creator_name_raw = (row.get("Creator") or "").strip()
+        if not creator_name_raw:
+            continue
+
+        total_earnings = parse_money(row.get("Total earnings Net"))
+        if total_earnings is None:
+            continue
+
+        date_range_raw = (row.get("Date/Time") or "").strip()
+        period_start, period_end = _parse_date_range(date_range_raw)
+
+        normalized = normalize_creator_name(creator_name_raw)
+        normalized = resolved_overrides.get(normalized, normalized)
+
+        rows_out.append(
+            EarningsAggregateRow(
+                source="onlyfans_90d",
+                source_file=path.name,
+                source_window=f"{period_start.isoformat()}_to_{period_end.isoformat()}",
+                creator_name_raw=creator_name_raw,
+                creator_name_normalized=normalized,
+                amount_usd=total_earnings,
+                period_start=period_start,
+                period_end=period_end,
+            )
+        )
+
+    return rows_out
+
+
+def parse_chaturbate_monthly_revenue(path: Path, *, overrides: dict[str, str] | None = None) -> list[EarningsAggregateRow]:
+    resolved_overrides = overrides or {}
+    year_month = _parse_year_month_from_name(path)
+    last_day = calendar.monthrange(year_month.year, year_month.month)[1]
+    period_start = date(year_month.year, year_month.month, 1)
+    period_end = date(year_month.year, year_month.month, last_day)
+
+    rows_out: list[EarningsAggregateRow] = []
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+
+    for row in rows:
+        creator_name_raw = (row.get("Model Name") or "").strip()
+        if not creator_name_raw:
+            continue
+
+        total_revenue = parse_money(row.get("Total Revenue USD"))
+        if total_revenue is None:
+            continue
+
+        normalized = normalize_creator_name(creator_name_raw)
+        normalized = resolved_overrides.get(normalized, normalized)
+
+        rows_out.append(
+            EarningsAggregateRow(
+                source="chaturbate_monthly",
+                source_file=path.name,
+                source_window=f"{year_month.year:04d}-{year_month.month:02d}",
+                creator_name_raw=creator_name_raw,
+                creator_name_normalized=normalized,
+                amount_usd=total_revenue,
+                period_start=period_start,
+                period_end=period_end,
+            )
+        )
+
+    return rows_out
+
+
+def parse_earnings_bundle(
+    *,
+    onlyfans_csv: Path,
+    chaturbate_monthly_csvs: Iterable[Path],
+    overrides: dict[str, str] | None = None,
+) -> list[EarningsAggregateRow]:
+    rows: list[EarningsAggregateRow] = []
+    rows.extend(parse_onlyfans_earnings(onlyfans_csv, overrides=overrides))
+    for csv_path in sorted(chaturbate_monthly_csvs):
+        rows.extend(parse_chaturbate_monthly_revenue(csv_path, overrides=overrides))
+    return rows
+
+
+def compute_earnings_source_totals(rows: Iterable[EarningsAggregateRow]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for row in rows:
+        existing = totals.get(row.source, 0.0)
+        totals[row.source] = round(existing + row.amount_usd, 2)
+    return totals
 
 
 def resolve_creator_identity(
@@ -284,3 +400,24 @@ def build_reconciliation_report(
 
 def dataclass_list_to_dict(items: Iterable[object]) -> list[dict[str, object]]:
     return [asdict(item) for item in items]
+
+
+def _parse_date_range(value: str) -> tuple[date, date]:
+    normalized = value.strip()
+    match = re.match(r"^\s*(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})\s*$", normalized)
+    if not match:
+        raise ValueError(f"invalid date range: {value}")
+    start = date.fromisoformat(match.group(1))
+    end = date.fromisoformat(match.group(2))
+    if end < start:
+        raise ValueError(f"date range end is before start: {value}")
+    return start, end
+
+
+def _parse_year_month_from_name(path: Path) -> date:
+    match = re.search(r"(\d{4})-(\d{2})", path.stem)
+    if not match:
+        raise ValueError(f"unable to derive year-month from filename: {path.name}")
+    year = int(match.group(1))
+    month = int(match.group(2))
+    return date(year, month, 1)
