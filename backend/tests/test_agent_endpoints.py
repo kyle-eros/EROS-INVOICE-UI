@@ -9,7 +9,7 @@ from invoicing_web import api as api_module
 from invoicing_web.broker_tokens import create_broker_token, encode_broker_token
 from invoicing_web.config import Settings
 from invoicing_web.main import create_app
-from invoicing_web.openclaw import HttpOpenClawSender, StubOpenClawSender
+from invoicing_web.notifier import HttpNotifierSender, StubNotifierSender
 
 _TEST_SETTINGS = Settings(
     admin_password="test-admin-pass",
@@ -25,8 +25,12 @@ PREFIX = "/api/v1/invoicing"
 
 
 def _client() -> TestClient:
-    api_module.task_store.reset()
-    api_module.openclaw_sender = StubOpenClawSender(enabled=True, channel="email,sms")
+    from invoicing_web.config import get_settings
+    api_module._settings = get_settings()
+    api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
+    api_module.reset_runtime_state_for_tests()
+    api_module.notifier_sender = StubNotifierSender(enabled=True, channel="email,sms")
+    api_module.openclaw_sender = api_module.notifier_sender
     return TestClient(create_app())
 
 
@@ -234,12 +238,12 @@ def test_admin_revokes_broker_token() -> None:
 
 def test_sender_factory_stub() -> None:
     settings = Settings(
-        openclaw_sender_type="stub",
-        openclaw_enabled=True,
-        openclaw_channel="email,sms",
+        notifier_sender_type="stub",
+        notifier_enabled=True,
+        notifier_channel="email,sms",
     )
     sender = api_module._create_sender(settings)
-    assert isinstance(sender, StubOpenClawSender)
+    assert isinstance(sender, StubNotifierSender)
 
 
 # ---------------------------------------------------------------------------
@@ -249,11 +253,11 @@ def test_sender_factory_stub() -> None:
 
 def test_sender_factory_http() -> None:
     settings = Settings(
-        openclaw_sender_type="http",
-        openclaw_api_base_url="https://api.openclaw.example.com",
-        openclaw_api_key="test-api-key-123",
-        openclaw_channel="email,sms",
-        openclaw_timeout_seconds=15,
+        notifier_sender_type="http",
+        notifier_api_base_url="https://api.notify.example.com",
+        notifier_api_key="test-api-key-123",
+        notifier_channel="email,sms",
+        notifier_timeout_seconds=15,
     )
     sender = api_module._create_sender(settings)
-    assert isinstance(sender, HttpOpenClawSender)
+    assert isinstance(sender, HttpNotifierSender)

@@ -3,6 +3,11 @@ from __future__ import annotations
 from typing import Protocol
 
 from .models import (
+    CreatorDispatchAcknowledgeResponse,
+    CreatorInvoicesResponse,
+    InvoicePdfContext,
+    InvoiceDispatchRequest,
+    InvoiceDispatchResponse,
     EscalationItem,
     InvoiceRecord,
     InvoiceUpsertRequest,
@@ -12,19 +17,27 @@ from .models import (
     ReminderRunResponse,
     ReminderSummaryResponse,
 )
-from .openclaw import OpenClawSender
+from .notifier import NotifierSender
 
 
 class InvoiceRepository(Protocol):
     def upsert_invoices(self, payload: InvoiceUpsertRequest) -> list[InvoiceRecord]: ...
 
+    def dispatch_invoice(self, payload: InvoiceDispatchRequest) -> InvoiceDispatchResponse: ...
+
+    def acknowledge_dispatch(self, dispatch_id: str) -> CreatorDispatchAcknowledgeResponse: ...
+
     def apply_payment_event(self, payload: PaymentEventRequest) -> PaymentEventResponse: ...
 
     def list_invoices(self) -> list[InvoiceRecord]: ...
 
+    def get_creator_invoices(self, creator_id: str) -> CreatorInvoicesResponse: ...
+
+    def get_creator_invoice_pdf(self, creator_id: str, invoice_id: str) -> InvoicePdfContext: ...
+
 
 class ReminderRepository(Protocol):
-    def run_reminders(self, payload: ReminderRunRequest, sender: OpenClawSender) -> ReminderRunResponse: ...
+    def run_reminders(self, payload: ReminderRunRequest, sender: NotifierSender) -> ReminderRunResponse: ...
 
     def get_reminder_summary(self) -> ReminderSummaryResponse: ...
 

@@ -9,19 +9,36 @@ from threading import Lock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import (
+    AchExchangeRequest,
+    AchExchangeResponse,
+    AchLinkTokenRequest,
+    AchLinkTokenResponse,
     Artifact,
     ArtifactListResponse,
     CreatorDispatchAcknowledgeResponse,
     CreatorInvoiceItem,
     CreatorInvoicesResponse,
     EscalationItem,
+    InvoiceDetailPayload,
     InvoiceDispatchRequest,
     InvoiceDispatchResponse,
+    InvoicePdfContext,
     InvoiceRecord,
     InvoiceUpsertRequest,
+    PaymentCheckoutSessionRequest,
+    PaymentCheckoutSessionResponse,
     PaymentEventRequest,
     PaymentEventResponse,
+    PaymentInvoiceStatusResponse,
+    PaymentIntentStatus,
+    PaymentWebhookEventRequest,
+    PaymentWebhookEventResponse,
+    PayoutItem,
+    PayoutListResponse,
     PreviewRequest,
+    ReconciliationCaseItem,
+    ReconciliationCaseResolveRequest,
+    ReconciliationCaseResolveResponse,
     ReminderChannelResult,
     ReminderResult,
     ReminderRunRequest,
@@ -31,7 +48,7 @@ from .models import (
     TaskDetail,
     TaskSummary,
 )
-from .openclaw import OpenClawSender, ProviderSendRequest, mask_contact_target
+from .notifier import NotifierSender, ProviderSendRequest, mask_contact_target
 
 REMINDER_MAX_ATTEMPTS = 6
 REMINDER_COOLDOWN = timedelta(hours=48)
@@ -45,12 +62,24 @@ class InvoiceNotFoundError(KeyError):
     """Raised when an operation references an invoice id that does not exist."""
 
 
+class InvoiceDetailNotFoundError(KeyError):
+    """Raised when an invoice exists but has no detail payload for PDF rendering."""
+
+
 class DispatchNotFoundError(KeyError):
     """Raised when a dispatch id does not exist."""
 
 
 class CreatorNotFoundError(KeyError):
     """Raised when a creator id is not present in invoice records."""
+
+
+class ReconciliationCaseNotFoundError(KeyError):
+    """Raised when a reconciliation case id does not exist."""
+
+
+class PayoutNotFoundError(KeyError):
+    """Raised when a payout id does not exist."""
 
 
 RATE_LIMIT_MAX_ATTEMPTS = 5
@@ -98,6 +127,7 @@ class _InvoiceRecord:
     last_payment_at: datetime | None
     last_reminder_at: datetime | None
     updated_at: datetime
+    detail: InvoiceDetailPayload | None
 
 
 @dataclass
@@ -129,6 +159,47 @@ class _ReminderRunSnapshot:
     skipped_count: int
 
 
+@dataclass
+class _PaymentCheckoutSessionRecord:
+    checkout_session_id: str
+    invoice_id: str
+    provider: str
+    status: PaymentIntentStatus
+    amount_due: float
+    currency: str
+    client_token: str
+    available_methods: list[str]
+    expires_at: datetime
+    idempotency_key: str | None
+    created_at: datetime
+
+
+@dataclass
+class _ReconciliationCaseRecord:
+    case_id: str
+    provider: str
+    event_id: str
+    invoice_id: str | None
+    reason: str
+    status: str
+    created_at: datetime
+    resolved_at: datetime | None = None
+    resolution_note: str | None = None
+
+
+@dataclass
+class _PayoutRecord:
+    payout_id: str
+    invoice_id: str
+    amount: float
+    currency: str
+    destination_label: str
+    provider: str
+    status: str
+    created_at: datetime
+    settled_at: datetime | None = None
+
+
 class InMemoryTaskStore:
     """Deterministic in-memory store with incremental task ids."""
 
@@ -146,6 +217,15 @@ class InMemoryTaskStore:
         self._dispatch_idempotency: dict[str, str] = {}
 
         self._payment_event_index: set[str] = set()
+        self._checkout_counter = count(1)
+        self._checkout_sessions: dict[str, _PaymentCheckoutSessionRecord] = {}
+        self._checkout_idempotency: dict[str, str] = {}
+        self._latest_checkout_by_invoice: dict[str, str] = {}
+        self._webhook_event_index: set[str] = set()
+        self._reconciliation_counter = count(1)
+        self._reconciliation_cases: dict[str, _ReconciliationCaseRecord] = {}
+        self._payout_counter = count(1)
+        self._payouts: dict[str, _PayoutRecord] = {}
         self._reminder_logs: list[ReminderResult] = []
         self._last_reminder_run: _ReminderRunSnapshot | None = None
         self._reminder_run_idempotency: dict[str, ReminderRunResponse] = {}
@@ -170,6 +250,15 @@ class InMemoryTaskStore:
             self._dispatch_idempotency.clear()
 
             self._payment_event_index.clear()
+            self._checkout_counter = count(1)
+            self._checkout_sessions.clear()
+            self._checkout_idempotency.clear()
+            self._latest_checkout_by_invoice.clear()
+            self._webhook_event_index.clear()
+            self._reconciliation_counter = count(1)
+            self._reconciliation_cases.clear()
+            self._payout_counter = count(1)
+            self._payouts.clear()
             self._reminder_logs.clear()
             self._last_reminder_run = None
             self._reminder_run_idempotency.clear()
@@ -354,6 +443,7 @@ class InMemoryTaskStore:
                         last_payment_at=None,
                         last_reminder_at=None,
                         updated_at=now,
+                        detail=item.detail.model_copy(deep=True) if item.detail is not None else None,
                     )
                     self._invoices[item.invoice_id] = record
                 else:
@@ -370,6 +460,7 @@ class InMemoryTaskStore:
                     record.due_date = item.due_date
                     record.opt_out = item.opt_out
                     record.updated_at = now
+                    record.detail = item.detail.model_copy(deep=True) if item.detail is not None else None
 
                 self._refresh_invoice_status(record, now)
                 self._refresh_invoice_notification(record)
@@ -486,12 +577,14 @@ class InMemoryTaskStore:
                         amount_due=record.amount_due,
                         amount_paid=record.amount_paid,
                         balance_due=record.balance_due,
+                        issued_at=record.issued_at,
                         due_date=record.due_date,
                         status=record.status,
                         dispatch_id=record.dispatch_id,
                         dispatched_at=record.dispatched_at,
                         notification_state=record.notification_state,
                         reminder_count=record.reminder_count,
+                        has_pdf=record.detail is not None,
                         last_reminder_at=record.last_reminder_at,
                     )
                 )
@@ -499,40 +592,284 @@ class InMemoryTaskStore:
             creator_name = records[0].creator_name
             return CreatorInvoicesResponse(creator_id=creator_id, creator_name=creator_name, invoices=items)
 
-    def apply_payment_event(self, payload: PaymentEventRequest) -> PaymentEventResponse:
-        now = datetime.now(timezone.utc)
+    def get_creator_invoice_pdf(self, creator_id: str, invoice_id: str) -> InvoicePdfContext:
+        with self._lock:
+            record = self._invoices.get(invoice_id)
+            if (
+                record is None
+                or record.creator_id != creator_id
+                or record.dispatch_id is None
+                or record.dispatched_at is None
+            ):
+                raise InvoiceNotFoundError(invoice_id)
+            if record.detail is None:
+                raise InvoiceDetailNotFoundError(invoice_id)
 
+            now = datetime.now(timezone.utc)
+            self._refresh_invoice_status(record, now)
+            self._refresh_invoice_notification(record)
+            return InvoicePdfContext(
+                invoice_id=record.invoice_id,
+                creator_id=record.creator_id,
+                creator_name=record.creator_name,
+                issued_at=record.issued_at,
+                due_date=record.due_date,
+                currency=record.currency,
+                amount_due=record.amount_due,
+                detail=record.detail.model_copy(deep=True),
+            )
+
+    def create_checkout_session(
+        self,
+        payload: PaymentCheckoutSessionRequest,
+        *,
+        provider_name: str,
+    ) -> PaymentCheckoutSessionResponse:
         with self._lock:
             record = self._invoices.get(payload.invoice_id)
             if record is None:
                 raise InvoiceNotFoundError(payload.invoice_id)
+            if record.balance_due <= 0:
+                raise ValueError("invoice is already fully paid")
 
-            if payload.event_id in self._payment_event_index:
-                self._refresh_invoice_status(record, now)
-                self._refresh_invoice_notification(record)
-                return PaymentEventResponse(
-                    event_id=payload.event_id,
-                    invoice_id=record.invoice_id,
-                    applied=False,
-                    status=record.status,
-                    balance_due=record.balance_due,
-                )
+            idem = payload.idempotency_key
+            if idem and idem in self._checkout_idempotency:
+                existing_id = self._checkout_idempotency[idem]
+                existing = self._checkout_sessions.get(existing_id)
+                if existing is not None:
+                    return self._to_checkout_response(existing)
 
-            self._payment_event_index.add(payload.event_id)
-            record.amount_paid = self._round_amount(min(record.amount_due, record.amount_paid + payload.amount))
-            record.balance_due = self._round_amount(max(record.amount_due - record.amount_paid, 0))
-            if record.last_payment_at is None or payload.paid_at > record.last_payment_at:
-                record.last_payment_at = payload.paid_at
-            record.updated_at = now
+            now = datetime.now(timezone.utc)
+            checkout_id = f"chk_{next(self._checkout_counter):06d}"
+            session = _PaymentCheckoutSessionRecord(
+                checkout_session_id=checkout_id,
+                invoice_id=record.invoice_id,
+                provider=provider_name,
+                status="requires_payment_method",
+                amount_due=record.balance_due,
+                currency=record.currency,
+                client_token=secrets.token_urlsafe(24),
+                available_methods=list(payload.payment_methods),
+                expires_at=now + timedelta(minutes=30),
+                idempotency_key=idem,
+                created_at=now,
+            )
+            self._checkout_sessions[checkout_id] = session
+            self._latest_checkout_by_invoice[record.invoice_id] = checkout_id
+            if idem:
+                self._checkout_idempotency[idem] = checkout_id
+            return self._to_checkout_response(session)
+
+    def create_ach_link_token(
+        self,
+        payload: AchLinkTokenRequest,
+        *,
+        provider_name: str,
+    ) -> AchLinkTokenResponse:
+        now = datetime.now(timezone.utc)
+        token = f"link_{payload.creator_id}_{secrets.token_urlsafe(18)}"
+        return AchLinkTokenResponse(
+            provider=provider_name,
+            link_token=token,
+            expires_at=now + timedelta(minutes=30),
+        )
+
+    def exchange_ach_token(
+        self,
+        payload: AchExchangeRequest,
+        *,
+        provider_name: str,
+    ) -> AchExchangeResponse:
+        token_tail = payload.account_id[-4:] if len(payload.account_id) >= 4 else payload.account_id
+        return AchExchangeResponse(
+            provider=provider_name,
+            payment_method_id=f"pm_ach_{secrets.token_urlsafe(8)}",
+            creator_id=payload.creator_id,
+            account_mask=f"****{token_tail}",
+            bank_name="Verified ACH Account",
+            status="requires_payment_method",
+        )
+
+    def get_payment_invoice_status(self, invoice_id: str) -> PaymentInvoiceStatusResponse:
+        with self._lock:
+            record = self._invoices.get(invoice_id)
+            if record is None:
+                raise InvoiceNotFoundError(invoice_id)
+            now = datetime.now(timezone.utc)
             self._refresh_invoice_status(record, now)
             self._refresh_invoice_notification(record)
 
-            return PaymentEventResponse(
-                event_id=payload.event_id,
+            latest_checkout_id = self._latest_checkout_by_invoice.get(invoice_id)
+            latest_checkout = self._checkout_sessions.get(latest_checkout_id or "")
+            return PaymentInvoiceStatusResponse(
                 invoice_id=record.invoice_id,
-                applied=True,
                 status=record.status,
+                amount_due=record.amount_due,
+                amount_paid=record.amount_paid,
                 balance_due=record.balance_due,
+                currency=record.currency,
+                latest_checkout_session_id=latest_checkout.checkout_session_id if latest_checkout else None,
+                latest_checkout_status=latest_checkout.status if latest_checkout else None,
+                last_payment_at=record.last_payment_at,
+            )
+
+    def apply_payment_webhook(
+        self,
+        provider: str,
+        payload: PaymentWebhookEventRequest,
+        *,
+        settlement_destination_label: str,
+    ) -> PaymentWebhookEventResponse:
+        with self._lock:
+            event_key = f"{provider}:{payload.event_id}"
+            if event_key in self._webhook_event_index:
+                return PaymentWebhookEventResponse(
+                    provider=provider,
+                    event_id=payload.event_id,
+                    applied=False,
+                    invoice_id=payload.invoice_id,
+                )
+
+            self._webhook_event_index.add(event_key)
+            now = payload.occurred_at or datetime.now(timezone.utc)
+
+            normalized_status = payload.status.strip().lower()
+            if normalized_status not in {"succeeded", "settled"}:
+                case = self._create_reconciliation_case(
+                    provider=provider,
+                    event_id=payload.event_id,
+                    invoice_id=payload.invoice_id,
+                    reason=f"unsupported_status:{normalized_status}",
+                    created_at=now,
+                )
+                return PaymentWebhookEventResponse(
+                    provider=provider,
+                    event_id=payload.event_id,
+                    applied=False,
+                    invoice_id=payload.invoice_id,
+                    reconciliation_case_id=case.case_id,
+                )
+
+            if payload.invoice_id is None or payload.amount is None:
+                case = self._create_reconciliation_case(
+                    provider=provider,
+                    event_id=payload.event_id,
+                    invoice_id=payload.invoice_id,
+                    reason="missing_invoice_or_amount",
+                    created_at=now,
+                )
+                return PaymentWebhookEventResponse(
+                    provider=provider,
+                    event_id=payload.event_id,
+                    applied=False,
+                    invoice_id=payload.invoice_id,
+                    reconciliation_case_id=case.case_id,
+                )
+
+            record = self._invoices.get(payload.invoice_id)
+            if record is None:
+                case = self._create_reconciliation_case(
+                    provider=provider,
+                    event_id=payload.event_id,
+                    invoice_id=payload.invoice_id,
+                    reason="invoice_not_found",
+                    created_at=now,
+                )
+                return PaymentWebhookEventResponse(
+                    provider=provider,
+                    event_id=payload.event_id,
+                    applied=False,
+                    invoice_id=payload.invoice_id,
+                    reconciliation_case_id=case.case_id,
+                )
+
+            event_response = self._apply_payment_event_locked(
+                event_id=payload.event_id,
+                record=record,
+                amount=payload.amount,
+                paid_at=now,
+                source=f"webhook:{provider}",
+            )
+
+            latest_checkout_id = self._latest_checkout_by_invoice.get(record.invoice_id)
+            latest_checkout = self._checkout_sessions.get(latest_checkout_id or "")
+            if latest_checkout is not None:
+                latest_checkout.status = "succeeded"
+
+            if event_response.applied:
+                self._record_payout_if_settled(
+                    record=record,
+                    amount=payload.amount,
+                    provider=provider,
+                    destination_label=settlement_destination_label,
+                    settled_at=now,
+                )
+
+            return PaymentWebhookEventResponse(
+                provider=provider,
+                event_id=payload.event_id,
+                applied=event_response.applied,
+                invoice_id=record.invoice_id,
+                payment_status=event_response.status,
+                balance_due=event_response.balance_due,
+            )
+
+    def list_reconciliation_cases(self) -> list[ReconciliationCaseItem]:
+        with self._lock:
+            records = sorted(
+                self._reconciliation_cases.values(),
+                key=lambda value: value.created_at,
+                reverse=True,
+            )
+            return [self._to_reconciliation_case_item(value) for value in records]
+
+    def resolve_reconciliation_case(
+        self,
+        case_id: str,
+        payload: ReconciliationCaseResolveRequest,
+    ) -> ReconciliationCaseResolveResponse:
+        with self._lock:
+            case = self._reconciliation_cases.get(case_id)
+            if case is None:
+                raise ReconciliationCaseNotFoundError(case_id)
+            resolved_at = datetime.now(timezone.utc)
+            case.status = "resolved"
+            case.resolved_at = resolved_at
+            case.resolution_note = payload.resolution_note
+            return ReconciliationCaseResolveResponse(
+                case_id=case.case_id,
+                status="resolved",
+                resolved_at=resolved_at,
+                resolution_note=payload.resolution_note,
+            )
+
+    def list_payouts(self) -> PayoutListResponse:
+        with self._lock:
+            records = sorted(
+                self._payouts.values(),
+                key=lambda value: value.created_at,
+                reverse=True,
+            )
+            return PayoutListResponse(items=[self._to_payout_item(value) for value in records])
+
+    def get_payout(self, payout_id: str) -> PayoutItem:
+        with self._lock:
+            payout = self._payouts.get(payout_id)
+            if payout is None:
+                raise PayoutNotFoundError(payout_id)
+            return self._to_payout_item(payout)
+
+    def apply_payment_event(self, payload: PaymentEventRequest) -> PaymentEventResponse:
+        with self._lock:
+            record = self._invoices.get(payload.invoice_id)
+            if record is None:
+                raise InvoiceNotFoundError(payload.invoice_id)
+            return self._apply_payment_event_locked(
+                event_id=payload.event_id,
+                record=record,
+                amount=payload.amount,
+                paid_at=payload.paid_at,
+                source=payload.source,
             )
 
     def get_reminder_summary(self) -> ReminderSummaryResponse:
@@ -568,7 +905,7 @@ class InMemoryTaskStore:
                 last_run_skipped_count=snapshot.skipped_count if snapshot else None,
             )
 
-    def run_reminders(self, payload: ReminderRunRequest, sender: OpenClawSender) -> ReminderRunResponse:
+    def run_reminders(self, payload: ReminderRunRequest, sender: NotifierSender) -> ReminderRunResponse:
         with self._lock:
             if payload.idempotency_key and payload.idempotency_key in self._reminder_run_idempotency:
                 return self._reminder_run_idempotency[payload.idempotency_key]
@@ -745,6 +1082,137 @@ class InMemoryTaskStore:
         with self._lock:
             now = datetime.now(timezone.utc)
             return self._current_escalations(now)
+
+    def _apply_payment_event_locked(
+        self,
+        *,
+        event_id: str,
+        record: _InvoiceRecord,
+        amount: float,
+        paid_at: datetime,
+        source: str,
+    ) -> PaymentEventResponse:
+        now = datetime.now(timezone.utc)
+        if event_id in self._payment_event_index:
+            self._refresh_invoice_status(record, now)
+            self._refresh_invoice_notification(record)
+            return PaymentEventResponse(
+                event_id=event_id,
+                invoice_id=record.invoice_id,
+                applied=False,
+                status=record.status,
+                balance_due=record.balance_due,
+            )
+
+        self._payment_event_index.add(event_id)
+        record.amount_paid = self._round_amount(min(record.amount_due, record.amount_paid + amount))
+        record.balance_due = self._round_amount(max(record.amount_due - record.amount_paid, 0))
+        if record.last_payment_at is None or paid_at > record.last_payment_at:
+            record.last_payment_at = paid_at
+        record.updated_at = now
+        self._refresh_invoice_status(record, now)
+        self._refresh_invoice_notification(record)
+
+        latest_checkout_id = self._latest_checkout_by_invoice.get(record.invoice_id)
+        latest_checkout = self._checkout_sessions.get(latest_checkout_id or "")
+        if latest_checkout is not None:
+            latest_checkout.status = "succeeded" if record.balance_due <= 0 else "processing"
+
+        _ = source  # retained for future provider-specific routing.
+        return PaymentEventResponse(
+            event_id=event_id,
+            invoice_id=record.invoice_id,
+            applied=True,
+            status=record.status,
+            balance_due=record.balance_due,
+        )
+
+    def _create_reconciliation_case(
+        self,
+        *,
+        provider: str,
+        event_id: str,
+        invoice_id: str | None,
+        reason: str,
+        created_at: datetime,
+    ) -> _ReconciliationCaseRecord:
+        case_id = f"recon_{next(self._reconciliation_counter):06d}"
+        case = _ReconciliationCaseRecord(
+            case_id=case_id,
+            provider=provider,
+            event_id=event_id,
+            invoice_id=invoice_id,
+            reason=reason,
+            status="open",
+            created_at=created_at,
+        )
+        self._reconciliation_cases[case_id] = case
+        return case
+
+    def _record_payout_if_settled(
+        self,
+        *,
+        record: _InvoiceRecord,
+        amount: float,
+        provider: str,
+        destination_label: str,
+        settled_at: datetime,
+    ) -> None:
+        if amount <= 0:
+            return
+        payout_id = f"payout_{next(self._payout_counter):06d}"
+        status = "settled" if record.balance_due <= 0 else "in_transit"
+        payout = _PayoutRecord(
+            payout_id=payout_id,
+            invoice_id=record.invoice_id,
+            amount=self._round_amount(amount),
+            currency=record.currency,
+            destination_label=destination_label,
+            provider=provider,
+            status=status,
+            created_at=settled_at,
+            settled_at=settled_at if status == "settled" else None,
+        )
+        self._payouts[payout_id] = payout
+
+    def _to_checkout_response(self, record: _PaymentCheckoutSessionRecord) -> PaymentCheckoutSessionResponse:
+        return PaymentCheckoutSessionResponse(
+            checkout_session_id=record.checkout_session_id,
+            invoice_id=record.invoice_id,
+            provider=record.provider,
+            status=record.status,
+            amount_due=record.amount_due,
+            currency=record.currency,
+            client_token=record.client_token,
+            available_methods=record.available_methods,
+            expires_at=record.expires_at,
+        )
+
+    def _to_reconciliation_case_item(self, record: _ReconciliationCaseRecord) -> ReconciliationCaseItem:
+        return ReconciliationCaseItem(
+            case_id=record.case_id,
+            provider=record.provider,
+            event_id=record.event_id,
+            invoice_id=record.invoice_id,
+            reason=record.reason,
+            status=record.status,  # type: ignore[arg-type]
+            created_at=record.created_at,
+            resolved_at=record.resolved_at,
+            resolution_note=record.resolution_note,
+        )
+
+    def _to_payout_item(self, record: _PayoutRecord) -> PayoutItem:
+        return PayoutItem(
+            payout_id=record.payout_id,
+            invoice_id=record.invoice_id,
+            amount=record.amount,
+            currency=record.currency,
+            destination_label=record.destination_label,
+            provider=record.provider,
+            status=record.status,  # type: ignore[arg-type]
+            created_at=record.created_at,
+            settled_at=record.settled_at,
+        )
 
     def _masked_dispatch_targets(self, dispatch: _DispatchRecord | None) -> str | None:
         if dispatch is None:

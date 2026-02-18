@@ -51,6 +51,28 @@ def _invoice_payload(
     }
 
 
+def _invoice_detail_payload(*, gross_total: float = 500.0, split_percent: float = 50.0) -> dict:
+    return {
+        "service_description": "Account Management/Marketing",
+        "payment_method_label": "Zelle/ACH Direct Deposit",
+        "payment_instructions": {
+            "zelle_account_number": "609-969-0562",
+            "direct_deposit_account_number": "867595156",
+            "direct_deposit_routing_number": "061092387",
+        },
+        "line_items": [
+            {
+                "platform": "OnlyFans",
+                "period_start": "2025-10-01",
+                "period_end": "2025-10-31",
+                "line_label": "Grace Bennett (Paid)",
+                "gross_total": gross_total,
+                "split_percent": split_percent,
+            }
+        ],
+    }
+
+
 def _dispatch_payload(*, invoice_id: str, dispatch_time: str, idempotency_key: str = "dispatch-key-001") -> dict:
     return {
         "invoice_id": invoice_id,
@@ -63,7 +85,10 @@ def _dispatch_payload(*, invoice_id: str, dispatch_time: str, idempotency_key: s
 
 
 def _client() -> TestClient:
-    api_module.task_store.reset()
+    from invoicing_web.config import get_settings
+    api_module._settings = get_settings()
+    api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
+    api_module.reset_runtime_state_for_tests()
     api_module.openclaw_sender = StubOpenClawSender(enabled=True, channel="email,sms")
     return TestClient(create_app())
 
@@ -168,6 +193,20 @@ def test_invoice_upsert_and_payment_event_idempotency() -> None:
     assert duplicate_payment.status_code == 200
     assert duplicate_payment.json()["applied"] is False
     assert duplicate_payment.json()["balance_due"] == 150.0
+
+
+def test_invoice_upsert_detail_total_validation() -> None:
+    client = _client()
+
+    valid_payload = _invoice_payload(invoice_id="inv-detail-ok", due_date="2026-03-01")
+    valid_payload["detail"] = _invoice_detail_payload()
+    valid_upsert = client.post("/api/v1/invoicing/invoices/upsert", json={"invoices": [valid_payload]})
+    assert valid_upsert.status_code == 200
+
+    invalid_payload = _invoice_payload(invoice_id="inv-detail-bad", due_date="2026-03-01")
+    invalid_payload["detail"] = _invoice_detail_payload(gross_total=100.0, split_percent=50.0)
+    invalid_upsert = client.post("/api/v1/invoicing/invoices/upsert", json={"invoices": [invalid_payload]})
+    assert invalid_upsert.status_code == 422
 
 
 def test_dispatch_and_acknowledge_flow() -> None:
