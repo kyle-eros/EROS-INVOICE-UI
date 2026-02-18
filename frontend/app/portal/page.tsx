@@ -15,19 +15,59 @@ const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "UTC",
 });
 
-const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-});
+const CURRENCY_FORMATTERS = new Map<string, Intl.NumberFormat>();
 
 function formatDate(value: string): string {
   const parsed = new Date(`${value}T00:00:00Z`);
   return Number.isNaN(parsed.getTime()) ? value : DATE_FORMATTER.format(parsed);
 }
 
-function formatCurrency(value: number): string {
-  return CURRENCY_FORMATTER.format(value);
+function normalizeCurrency(currency: string): string {
+  const normalized = currency.trim().toUpperCase();
+  return normalized || "USD";
+}
+
+function formatterForCurrency(currency: string): Intl.NumberFormat | null {
+  const normalized = normalizeCurrency(currency);
+  const existing = CURRENCY_FORMATTERS.get(normalized);
+  if (existing) {
+    return existing;
+  }
+  try {
+    const formatter = new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: normalized,
+      minimumFractionDigits: 2,
+    });
+    CURRENCY_FORMATTERS.set(normalized, formatter);
+    return formatter;
+  } catch {
+    return null;
+  }
+}
+
+function formatCurrency(value: number, currency: string): string {
+  const normalized = normalizeCurrency(currency);
+  const formatter = formatterForCurrency(normalized);
+  if (!formatter) {
+    return `${normalized} ${value.toFixed(2)}`;
+  }
+  return formatter.format(value);
+}
+
+function formatInvoiceStatus(status: CreatorInvoiceItem["status"]): string {
+  if (status === "paid") return "Paid";
+  if (status === "partial") return "Partial";
+  if (status === "overdue") return "Overdue";
+  if (status === "escalated") return "Escalated";
+  return "Open";
+}
+
+function statusTone(status: CreatorInvoiceItem["status"]): "success" | "warning" | "brand" | "danger" {
+  if (status === "paid") return "success";
+  if (status === "partial") return "warning";
+  if (status === "overdue" || status === "escalated") return "danger";
+  return "brand";
 }
 
 export default async function PortalPage() {
@@ -108,8 +148,18 @@ export default async function PortalPage() {
     );
   }
 
-  const unfulfilledCount = invoices.filter((invoice) => invoice.notification_state !== "fulfilled").length;
-  const hasUnfulfilled = unfulfilledCount > 0;
+  const outstandingInvoices = invoices.filter((invoice) => invoice.balance_due > 0);
+  const outstandingCount = outstandingInvoices.length;
+  const outstandingByCurrency = new Map<string, number>();
+  for (const invoice of outstandingInvoices) {
+    const currency = normalizeCurrency(invoice.currency);
+    const total = outstandingByCurrency.get(currency) ?? 0;
+    outstandingByCurrency.set(currency, total + invoice.balance_due);
+  }
+  const outstandingBreakdown = Array.from(outstandingByCurrency.entries()).map(([currency, total]) =>
+    formatCurrency(total, currency),
+  );
+  const hasOutstanding = outstandingCount > 0;
 
   const columns: DataColumn<CreatorInvoiceItem>[] = [
     {
@@ -122,17 +172,29 @@ export default async function PortalPage() {
       id: "status",
       header: "Status",
       render: (invoice) => (
-        <StatusBadge tone={invoice.notification_state === "fulfilled" ? "success" : "warning"}>
-          {invoice.notification_state === "fulfilled" ? "paid" : "unpaid"}
+        <StatusBadge tone={statusTone(invoice.status)}>
+          {formatInvoiceStatus(invoice.status)}
         </StatusBadge>
       ),
     },
     {
-      id: "balance",
-      header: "Amount Due",
+      id: "currency",
+      header: "Currency",
+      render: (invoice) => <span className="task-id">{normalizeCurrency(invoice.currency)}</span>,
+    },
+    {
+      id: "paid",
+      header: "Amount Paid",
       align: "right",
       className: "cell-sources",
-      render: (invoice) => <span className="numeric-cell">{formatCurrency(invoice.balance_due)}</span>,
+      render: (invoice) => <span className="numeric-cell">{formatCurrency(invoice.amount_paid, invoice.currency)}</span>,
+    },
+    {
+      id: "balance",
+      header: "Balance Due",
+      align: "right",
+      className: "cell-sources",
+      render: (invoice) => <span className="numeric-cell">{formatCurrency(invoice.balance_due, invoice.currency)}</span>,
     },
     {
       id: "due",
@@ -170,15 +232,23 @@ export default async function PortalPage() {
             <h1>{creatorName}&apos;s Invoices</h1>
             <LogoutButton />
           </div>
-          <p className="kicker">View your outstanding balances and confirm when you&apos;ve submitted payment.</p>
+          <p className="kicker">View your balances, track invoice status, and open official invoice PDFs.</p>
+          <p className="muted-small">
+            Demo note: this view may currently include imported 90-day earnings history used to validate portal and reminder
+            workflows.
+          </p>
         </header>
 
         <SurfaceCard as="section" className="creator-state-card reveal-item" data-delay="1">
-          <h2>{hasUnfulfilled ? "You have unpaid invoices" : "All invoices are paid"}</h2>
+          <h2>{hasOutstanding ? "You have outstanding invoices" : "All invoices are paid"}</h2>
           <p>
-            {hasUnfulfilled
-              ? `You have ${unfulfilledCount} outstanding invoice${unfulfilledCount === 1 ? "" : "s"} that still need payment.`
-              : "You're all caught up — no outstanding balances."}
+            {hasOutstanding
+              ? `You have ${outstandingCount} invoice${outstandingCount === 1 ? "" : "s"} with an open balance${
+                outstandingBreakdown.length === 1
+                  ? ` totaling ${outstandingBreakdown[0]}.`
+                  : ` across ${outstandingBreakdown.length} currencies (${outstandingBreakdown.join(", ")}).`
+              }`
+              : "You're all caught up with no outstanding balances."}
           </p>
         </SurfaceCard>
 

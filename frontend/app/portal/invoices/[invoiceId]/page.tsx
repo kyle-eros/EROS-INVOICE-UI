@@ -2,6 +2,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { BrandWordmark } from "../../../components/BrandWordmark";
+import { StatusBadge } from "../../../components/StatusBadge";
 import { SurfaceCard } from "../../../components/SurfaceCard";
 import { BackendApiError, getCreatorInvoicesBySession, type CreatorInvoiceItem } from "../../../../lib/api";
 import { LogoutButton } from "../../LogoutButton";
@@ -13,19 +14,59 @@ const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "UTC",
 });
 
-const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-});
+const CURRENCY_FORMATTERS = new Map<string, Intl.NumberFormat>();
 
 function formatDate(value: string): string {
   const parsed = new Date(`${value}T00:00:00Z`);
   return Number.isNaN(parsed.getTime()) ? value : DATE_FORMATTER.format(parsed);
 }
 
-function formatCurrency(value: number): string {
-  return CURRENCY_FORMATTER.format(value);
+function normalizeCurrency(currency: string): string {
+  const normalized = currency.trim().toUpperCase();
+  return normalized || "USD";
+}
+
+function formatterForCurrency(currency: string): Intl.NumberFormat | null {
+  const normalized = normalizeCurrency(currency);
+  const existing = CURRENCY_FORMATTERS.get(normalized);
+  if (existing) {
+    return existing;
+  }
+  try {
+    const formatter = new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: normalized,
+      minimumFractionDigits: 2,
+    });
+    CURRENCY_FORMATTERS.set(normalized, formatter);
+    return formatter;
+  } catch {
+    return null;
+  }
+}
+
+function formatCurrency(value: number, currency: string): string {
+  const normalized = normalizeCurrency(currency);
+  const formatter = formatterForCurrency(normalized);
+  if (!formatter) {
+    return `${normalized} ${value.toFixed(2)}`;
+  }
+  return formatter.format(value);
+}
+
+function formatInvoiceStatus(status: CreatorInvoiceItem["status"]): string {
+  if (status === "paid") return "Paid";
+  if (status === "partial") return "Partial";
+  if (status === "overdue") return "Overdue";
+  if (status === "escalated") return "Escalated";
+  return "Open";
+}
+
+function statusTone(status: CreatorInvoiceItem["status"]): "success" | "warning" | "brand" | "danger" {
+  if (status === "paid") return "success";
+  if (status === "partial") return "warning";
+  if (status === "overdue" || status === "escalated") return "danger";
+  return "brand";
 }
 
 export default async function InvoicePdfPage({
@@ -133,19 +174,55 @@ export default async function InvoicePdfPage({
             <LogoutButton />
           </div>
           <p className="kicker">Review invoice details and download a copy for your records.</p>
+          <p className="muted-small">
+            Demo note: reminder attempts, statuses, and balances on this page can reflect imported 90-day earnings data.
+          </p>
         </header>
 
         <SurfaceCard as="section" className="invoice-detail-card reveal-item" data-delay="1">
-          <div className="invoice-detail-meta">
-            <p><strong>Invoice:</strong> {invoice.invoice_id}</p>
-            <p><strong>Issued:</strong> {formatDate(invoice.issued_at)}</p>
-            <p><strong>Due:</strong> {formatDate(invoice.due_date)}</p>
-            <p><strong>Balance Due:</strong> {formatCurrency(invoice.balance_due)}</p>
+          <div className="invoice-detail-meta invoice-summary-grid">
+            <div className="invoice-summary-item">
+              <span>Invoice</span>
+              <strong>{invoice.invoice_id}</strong>
+            </div>
+            <div className="invoice-summary-item">
+              <span>Status</span>
+              <StatusBadge tone={statusTone(invoice.status)}>{formatInvoiceStatus(invoice.status)}</StatusBadge>
+            </div>
+            <div className="invoice-summary-item">
+              <span>Issued</span>
+              <strong>{formatDate(invoice.issued_at)}</strong>
+            </div>
+            <div className="invoice-summary-item">
+              <span>Due</span>
+              <strong>{formatDate(invoice.due_date)}</strong>
+            </div>
+            <div className="invoice-summary-item">
+              <span>Invoice Total</span>
+              <strong>{formatCurrency(invoice.amount_due, invoice.currency)}</strong>
+            </div>
+            <div className="invoice-summary-item">
+              <span>Amount Paid</span>
+              <strong>{formatCurrency(invoice.amount_paid, invoice.currency)}</strong>
+            </div>
+            <div className="invoice-summary-item">
+              <span>Balance Due</span>
+              <strong>{formatCurrency(invoice.balance_due, invoice.currency)}</strong>
+            </div>
+            <div className="invoice-summary-item">
+              <span>Reminder Attempts</span>
+              <strong>{invoice.reminder_count}</strong>
+            </div>
           </div>
           <div className="invoice-detail-actions">
             <Link className="button-link button-link--secondary" href="/portal">Back to invoices</Link>
             {invoice.has_pdf ? (
-              <a className="button-link" href={downloadPath}>Download PDF</a>
+              <>
+                <a className="button-link button-link--secondary" href={pdfPath} target="_blank" rel="noopener noreferrer">
+                  Open in new tab
+                </a>
+                <a className="button-link" href={downloadPath}>Download PDF</a>
+              </>
             ) : null}
           </div>
         </SurfaceCard>
@@ -165,7 +242,11 @@ export default async function InvoicePdfPage({
               className="invoice-pdf-frame"
               title={`Invoice PDF ${invoice.invoice_id}`}
               src={pdfPath}
+              loading="lazy"
             />
+            <p className="invoice-pdf-fallback">
+              If the embedded viewer does not load, use <strong>Open in new tab</strong> or <strong>Download PDF</strong>.
+            </p>
           </SurfaceCard>
         )}
       </div>

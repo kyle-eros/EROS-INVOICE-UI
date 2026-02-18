@@ -457,6 +457,10 @@ export default async function AdminPage({
           <div className="reminder-ops-card__head">
             <h2>Payment Reminders</h2>
             <p className="kicker">Track unpaid creator balances and send payment reminders via email and SMS.</p>
+            <p className="muted-small">
+              Demo data note: reminder counts and overdue totals may include imported 90-day history. Use test runs first
+              before any live send.
+            </p>
           </div>
 
           <div className="reminder-ops-card__actions">
@@ -733,9 +737,17 @@ export default async function AdminPage({
             <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="1">
               <h2>Overview</h2>
               <p>
-                This system combines invoice operations, payment tracking, durable reminder workflows, and guarded
-                two-way creator conversations.
+                EROS Invoicing Web combines earnings ingestion, invoice dispatch, creator portal access, payment
+                tracking, reconciliation, reminder workflows, and guarded two-way creator conversations.
               </p>
+              <ol className="admin-doc-list">
+                <li>Import earnings data (CSV/API) into creator invoices</li>
+                <li>Dispatch invoices to mark creators as portal-ready</li>
+                <li>Generate creator passkeys and manage session access</li>
+                <li>Track balances, payment events, and reconciliation cases</li>
+                <li>Evaluate and send reminders with durable run IDs</li>
+                <li>Handle creator replies in conversation inbox and escalation queues</li>
+              </ol>
               <div className="admin-doc-highlight">
                 <strong>Key defaults:</strong> Up to <strong>6 reminders</strong> per invoice, a{" "}
                 <strong>48-hour cooldown</strong> between reminder attempts, and conversation auto-replies disabled by default.
@@ -748,6 +760,10 @@ export default async function AdminPage({
               <p>
                 Reminder runs are operator-triggered from this dashboard. For live sends, use the two-step workflow:
                 evaluate first, then send the evaluated run.
+              </p>
+              <p className="muted-small">
+                The pipeline is fully implemented, but automated scheduler/orchestrator triggering is intentionally pending.
+                Until that handoff is enabled, all reminder runs are started manually by admins.
               </p>
 
               <h3>Two modes</h3>
@@ -915,16 +931,32 @@ export default async function AdminPage({
             <SurfaceCard as="section" className="admin-doc-card reveal-item">
               <h2>OpenClaw Agent Operations</h2>
               <p>
-                OpenClaw agents use broker-token scoped `/agent/*` routes. Each agent has narrow responsibilities:
+                OpenClaw agents use broker-token scoped <code>/agent/*</code> routes. They sit on top of the same invoice,
+                reminder, and conversation state used by this dashboard, so imported 90-day data is immediately available to
+                each agent workflow.
               </p>
               <ul className="admin-doc-list">
-                <li><strong>invoice-monitor</strong>: read-only invoice and reminder visibility</li>
-                <li><strong>notification-sender</strong>: reminder run triggering and escalation reads</li>
-                <li><strong>creator-conversation</strong>: conversation context, suggestion, and execute-action calls</li>
+                <li>
+                  <strong>invoice-monitor</strong>: read-only invoice and reminder visibility via <code>/agent/invoices</code>{" "}
+                  and <code>/agent/reminders/summary</code>
+                </li>
+                <li>
+                  <strong>notification-sender</strong>: reminder evaluation/sending via <code>/agent/reminders/run/once</code>{" "}
+                  and escalation visibility
+                </li>
+                <li>
+                  <strong>creator-conversation</strong>: thread context, suggestion, and execute-action calls for
+                  policy-governed replies
+                </li>
               </ul>
               <p>
-                Conversation agent actions do not bypass backend policy checks.
+                Conversation actions never bypass backend policy checks. If confidence/risk thresholds are not met, threads
+                are forced to human handoff even when agents are enabled.
               </p>
+              <div className="admin-doc-highlight">
+                <strong>Pipeline summary:</strong> data import → invoice state → reminder planning/sending → inbound replies
+                → policy gate → agent suggestion/execute → human handoff when needed.
+              </div>
             </SurfaceCard>
 
             <SurfaceCard as="section" className="admin-doc-card reveal-item">
