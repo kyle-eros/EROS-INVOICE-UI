@@ -27,7 +27,7 @@ from invoicing_web.cb_seed import (  # noqa: E402
     resolve_creator_identity,
 )
 from invoicing_web.main import create_app  # noqa: E402
-from invoicing_web.models import InvoiceUpsertItem  # noqa: E402
+from invoicing_web.models import ContactChannel, InvoiceUpsertItem  # noqa: E402
 from invoicing_web.openclaw import StubOpenClawSender  # noqa: E402
 
 
@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reconciliation-tolerance", type=float, default=0.15)
     parser.add_argument("--inject-scenario-pack", action="store_true")
     parser.add_argument("--simulate-payment-event", action="store_true")
+    parser.add_argument("--skip-settle-first-invoice", action="store_true")
+    parser.add_argument("--dispatch-email", default="kyle@erosops.com")
+    parser.add_argument("--dispatch-phone", default="+15555550123")
+    parser.add_argument("--dispatch-channels", default="email,sms", help="comma-separated channels: email,sms")
+    parser.add_argument("--skip-first-ack", action="store_true")
     return parser.parse_args()
 
 
@@ -59,6 +64,21 @@ def parse_utc_datetime(raw: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def parse_channels(raw: str) -> list[ContactChannel]:
+    parts = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    allowed = {"email", "sms"}
+    deduped: list[ContactChannel] = []
+    for part in parts:
+        if part not in allowed:
+            raise ValueError(f"invalid dispatch channel: {part}")
+        if part in deduped:
+            continue
+        deduped.append(part)  # type: ignore[arg-type]
+    if not deduped:
+        raise ValueError("at least one dispatch channel is required")
+    return deduped
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -131,6 +151,7 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     now_override = parse_utc_datetime(args.now_override)
+    channels = parse_channels(args.dispatch_channels)
 
     overrides = default_creator_overrides()
     overrides.update(parse_creator_overrides(args.creator_override))
@@ -176,6 +197,7 @@ def main() -> int:
         "creator_name": creator_name,
         "creator_id": creator_id,
         "overrides": overrides,
+        "dispatch_channels": channels,
     }
     write_json(output_dir / "profile.json", profile_payload)
     write_json(output_dir / "normalized_sessions.json", dataclass_list_to_dict(sessions))
@@ -191,12 +213,56 @@ def main() -> int:
         elif reconciliation.get("status") != "match":
             strict_failed = True
 
-    api_module.task_store.reset()
-    api_module.openclaw_sender = StubOpenClawSender(enabled=True, channel=args.contact_channel)
+    api_module.reset_runtime_state_for_tests()
+    api_module.openclaw_sender = StubOpenClawSender(
+        enabled=True, channel=",".join(channels)
+    )
     client = TestClient(create_app())
 
     api_results: dict[str, Any] = {}
     api_results["invoices_upsert"] = call_json(client, "POST", "/api/v1/invoicing/invoices/upsert", invoice_payload)
+
+    dispatch_results: list[dict[str, Any]] = []
+    for idx, invoice in enumerate(api_results["invoices_upsert"]["invoices"], start=1):
+        dispatch_payload: dict[str, Any] = {
+            "invoice_id": invoice["invoice_id"],
+            "dispatched_at": now_override.isoformat().replace("+00:00", "Z"),
+            "channels": channels,
+            "idempotency_key": f"cb-seed-dispatch-{idx:03d}",
+        }
+        if "email" in channels:
+            dispatch_payload["recipient_email"] = args.dispatch_email
+        if "sms" in channels:
+            dispatch_payload["recipient_phone"] = args.dispatch_phone
+        dispatch_results.append(call_json(client, "POST", "/api/v1/invoicing/invoices/dispatch", dispatch_payload))
+    api_results["dispatches"] = dispatch_results
+
+    if dispatch_results and not args.skip_first_ack:
+        first_dispatch_id = dispatch_results[0]["dispatch_id"]
+        api_results["creator_ack"] = call_json(client, "POST", f"/api/v1/invoicing/invoices/dispatch/{first_dispatch_id}/ack")
+    if api_results["invoices_upsert"]["invoices"]:
+        first_invoice_id = api_results["invoices_upsert"]["invoices"][0]["invoice_id"]
+        api_results["first_invoice_status_after_ack"] = call_json(
+            client,
+            "GET",
+            f"/api/v1/invoicing/payments/invoices/{first_invoice_id}/status",
+        )
+
+    dry_run_payload = {
+        "dry_run": True,
+        "now_override": now_override.isoformat().replace("+00:00", "Z"),
+        "idempotency_key": "cb-seed-reminder-dry-001",
+    }
+    api_results["reminders_dry_run"] = call_json(client, "POST", "/api/v1/invoicing/reminders/run/once", dry_run_payload)
+
+    if args.run_live:
+        live_payload = {
+            "dry_run": False,
+            "now_override": now_override.isoformat().replace("+00:00", "Z"),
+            "idempotency_key": "cb-seed-reminder-live-001",
+        }
+        api_results["reminders_live_run"] = call_json(client, "POST", "/api/v1/invoicing/reminders/run/once", live_payload)
+        api_results["reminders_live_run_idempotent"] = call_json(client, "POST", "/api/v1/invoicing/reminders/run/once", live_payload)
 
     if args.simulate_payment_event and api_results["invoices_upsert"]["invoices"]:
         first_invoice = api_results["invoices_upsert"]["invoices"][0]
@@ -212,19 +278,31 @@ def main() -> int:
         api_results["payment_event_applied"] = call_json(client, "POST", "/api/v1/invoicing/payments/events", payment_payload)
         api_results["payment_event_duplicate"] = call_json(client, "POST", "/api/v1/invoicing/payments/events", payment_payload)
 
-    dry_run_payload = {
-        "dry_run": True,
-        "now_override": now_override.isoformat().replace("+00:00", "Z"),
-    }
-    api_results["reminders_dry_run"] = call_json(client, "POST", "/api/v1/invoicing/reminders/run/once", dry_run_payload)
+        if not args.skip_settle_first_invoice:
+            remaining = round(float(api_results["payment_event_applied"]["balance_due"]), 2)
+            if remaining > 0:
+                settlement_payload = {
+                    "event_id": "cb-seed-payment-002",
+                    "invoice_id": first_invoice["invoice_id"],
+                    "amount": remaining,
+                    "paid_at": (now_override + timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+                    "source": "cb-seed-settlement",
+                    "metadata": {"source": "cb-seed-script", "phase": "settlement"},
+                }
+                api_results["payment_event_settlement"] = call_json(
+                    client,
+                    "POST",
+                    "/api/v1/invoicing/payments/events",
+                    settlement_payload,
+                )
 
-    if args.run_live:
-        live_payload = {
-            "dry_run": False,
-            "now_override": now_override.isoformat().replace("+00:00", "Z"),
-        }
-        api_results["reminders_live_run"] = call_json(client, "POST", "/api/v1/invoicing/reminders/run/once", live_payload)
-
+    if api_results["invoices_upsert"]["invoices"]:
+        first_invoice_id = api_results["invoices_upsert"]["invoices"][0]["invoice_id"]
+        api_results["first_invoice_status_after_payment"] = call_json(
+            client,
+            "GET",
+            f"/api/v1/invoicing/payments/invoices/{first_invoice_id}/status",
+        )
     api_results["reminders_summary"] = call_json(client, "GET", "/api/v1/invoicing/reminders/summary")
     api_results["reminders_escalations"] = call_json(client, "GET", "/api/v1/invoicing/reminders/escalations")
 

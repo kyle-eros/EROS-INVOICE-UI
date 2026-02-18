@@ -10,6 +10,8 @@ SALES_CSV="${1:-${SALES_CSV_DEFAULT}}"
 CREATOR_CSV="${2:-${CREATOR_CSV_DEFAULT}}"
 OUTPUT_DIR="${CB_SEED_OUTPUT_DIR:-/tmp/cb-seed-flow}"
 NOW_OVERRIDE="${CB_SEED_NOW_OVERRIDE:-2026-03-01T00:00:00Z}"
+DISPATCH_EMAIL="${CB_SEED_DISPATCH_EMAIL:-kyle@erosops.com}"
+DISPATCH_PHONE="${CB_SEED_DISPATCH_PHONE:-+15555550123}"
 
 if [[ ! -f "${SALES_CSV}" ]]; then
   echo "error: sales csv not found: ${SALES_CSV}" >&2
@@ -27,6 +29,8 @@ python3 "${ROOT_DIR}/scripts/seed_from_cb_reports.py" \
   --output-dir "${OUTPUT_DIR}" \
   --creator-override "grace bennett paid=grace bennett" \
   --now-override "${NOW_OVERRIDE}" \
+  --dispatch-email "${DISPATCH_EMAIL}" \
+  --dispatch-phone "${DISPATCH_PHONE}" \
   --run-live \
   --inject-scenario-pack \
   --simulate-payment-event

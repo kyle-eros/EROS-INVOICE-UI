@@ -25,6 +25,8 @@ frontend/out/
 frontend/.turbo/
 frontend/.npm/
 frontend/.pnpm-store/
+frontend/playwright-report/
+frontend/test-results/
 
 # Runtime artifacts
 artifacts/

@@ -11,6 +11,7 @@ Standalone scaffold containing:
 - Entry point: `invoicing_web.main:app`
 - API router: `invoicing_web.api`
 - Deterministic in-memory store: `invoicing_web.store`
+- Auth state store: in-memory by default; Postgres-backed passkeys/rate limits available via `AUTH_STORE_BACKEND=postgres`
 - Models: `invoicing_web.models`
 - Contract compatibility: accepts legacy preview payload shape used by `EROS_TUI_CRM_BUNDLE` bridge
 
@@ -25,8 +26,19 @@ Endpoints:
 - `POST /api/v1/invoicing/invoices/dispatch`
 - `POST /api/v1/invoicing/invoices/dispatch/{dispatch_id}/ack`
 - `POST /api/v1/invoicing/payments/events`
-- `POST /api/v1/invoicing/creator/magic-link`
-- `GET /api/v1/invoicing/creator/{token}/invoices`
+- `POST /api/v1/invoicing/payments/checkout-session`
+- `POST /api/v1/invoicing/payments/ach/link-token`
+- `POST /api/v1/invoicing/payments/ach/exchange`
+- `POST /api/v1/invoicing/payments/webhooks/{provider}`
+- `GET /api/v1/invoicing/payments/invoices/{invoice_id}/status`
+- `GET /api/v1/invoicing/admin/reconciliation/cases`
+- `POST /api/v1/invoicing/admin/reconciliation/cases/{case_id}/resolve`
+- `GET /api/v1/invoicing/admin/payouts`
+- `GET /api/v1/invoicing/admin/payouts/{payout_id}`
+- `POST /api/v1/invoicing/auth/lookup`
+- `POST /api/v1/invoicing/auth/confirm`
+- `GET /api/v1/invoicing/me/invoices`
+- `GET /api/v1/invoicing/me/invoices/{invoice_id}/pdf`
 - `GET /api/v1/invoicing/reminders/summary`
 - `POST /api/v1/invoicing/reminders/run/once`
 - `GET /api/v1/invoicing/reminders/escalations`
@@ -50,17 +62,19 @@ Preview payload example:
 - Next.js app-router experience with EROS branded design system
 - `app/page.tsx`: creator-facing landing page
 - `app/admin/page.tsx`: unified admin dashboard (ops + reference docs)
-- `app/creator/[token]/page.tsx`: creator-facing invoice notification view
-- `lib/api.ts`: backend API helper for task, reminder, and creator-notification endpoints
+- `app/portal/page.tsx`: creator invoice dashboard
+- `app/portal/invoices/[invoiceId]/page.tsx`: creator invoice PDF viewer
+- `lib/api.ts`: backend API helper for task, reminder, and creator session endpoints
 
-## Reminder Automation (OpenClaw-ready)
+## Reminder Automation (Internal Notifier)
 
 The reminder pipeline is deterministic and run-once driven:
 - Invoice state and reminder counters are stored in-memory.
+- Passkey auth state and login-rate-limit counters can be persisted in Postgres.
 - Invoices are reminder-eligible only after dispatch (`/invoices/dispatch`).
 - Payment updates arrive via API events (`/payments/events`).
 - Reminder runs execute through `/reminders/run/once`.
-- OpenClaw adapter is pluggable and defaults to dry-run-safe behavior.
+- Notifier adapter is pluggable and defaults to dry-run-safe behavior.
 
 Reminder policy defaults:
 - First reminder at due date.
@@ -119,12 +133,11 @@ Reminder policy defaults:
 }
 ```
 
-### Creator magic-link payload example
+### Passkey auth confirm payload example
 
 ```json
 {
-  "creator_id": "creator-123",
-  "ttl_minutes": 60
+  "passkey": "agency-issued-passkey"
 }
 ```
 
@@ -185,6 +198,8 @@ Notes:
 ```bash
 cd backend
 python3 -m pip install -e ".[dev]"
+# Run DB migrations when AUTH_STORE_BACKEND=postgres
+alembic -c alembic.ini upgrade head
 python3 -m uvicorn invoicing_web.main:app --app-dir src --reload
 ```
 
@@ -214,6 +229,17 @@ cd frontend
 npm run build
 npm run start
 ```
+
+Frontend auth flow E2E tests (Playwright):
+```bash
+cd frontend
+npx playwright install chromium
+npm run test:e2e
+```
+
+Notes:
+- Tests live in `frontend/tests-e2e/` and cover creator login + admin gate auth flows.
+- Set `E2E_BASE_URL` to target an already-running app instead of auto-starting one.
 
 ### Baseline checks (exact matrix)
 ```bash
@@ -247,11 +273,19 @@ INVOICING_WEB_LEGACY_SHIM_ENABLED=true
 Set these in the service environment (see `.env.example`):
 - `INVOICING_APP_NAME`
 - `INVOICING_API_PREFIX`
-- `OPENCLAW_ENABLED`
-- `OPENCLAW_DRY_RUN_DEFAULT`
-- `OPENCLAW_CHANNEL` (comma-separated, e.g. `email,sms`)
-- `OPENCLAW_API_BASE_URL`
-- `OPENCLAW_API_KEY`
+- `NOTIFIER_ENABLED`
+- `NOTIFIER_DRY_RUN_DEFAULT`
+- `NOTIFIER_CHANNEL` (comma-separated, e.g. `email,sms`)
+- `NOTIFIER_API_BASE_URL`
+- `NOTIFIER_API_KEY`
+- `PAYMENTS_PROVIDER`
+- `PAYMENTS_PROVIDER_NAME`
+- `AGENCY_SETTLEMENT_ACCOUNT_LABEL`
+- `AUTH_STORE_BACKEND` (`inmemory` or `postgres`)
+- `DATABASE_URL` (required when `AUTH_STORE_BACKEND=postgres`)
+- `OPENCLAW_*` legacy vars are still accepted as fallback during migration
 - `CREATOR_MAGIC_LINK_SECRET`
 - `CREATOR_PORTAL_BASE_URL`
+- `TRUST_PROXY_HEADERS`
+- `TRUSTED_PROXY_IPS` (comma-separated proxy source IP allowlist for honoring `X-Forwarded-For`)
 - `INVOICING_API_BASE_URL` (frontend server env)
