@@ -733,8 +733,72 @@ export default async function AdminPage({
           <summary><h2>Reference Documentation</h2></summary>
           <div className="admin-docs-disclosure__body">
 
-            {/* ── Overview ── */}
+            {/* ── OpenClaw Agent Operations ── */}
             <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="1">
+              <h2>OpenClaw Agent Operations</h2>
+              <p>
+                OpenClaw runs as the orchestration layer on the agency Mac mini and calls broker-token scoped{" "}
+                <code>/agent/*</code> routes on this backend. The backend remains the source of truth for invoice state,
+                reminder eligibility, conversation policy, and webhook security enforcement.
+              </p>
+
+              <h3>Mac mini Runtime Model</h3>
+              <ol className="admin-doc-list">
+                <li>
+                  OpenClaw gateway runs from <code>openclaw/docker/docker-compose.yml</code> and is published to{" "}
+                  <code>127.0.0.1:8080</code> (loopback-only).
+                </li>
+                <li>
+                  Backend API runs on <code>127.0.0.1:8000</code>; agent traffic is allowlisted through{" "}
+                  <code>host.docker.internal:8000</code>.
+                </li>
+                <li>
+                  Admin creates/revokes broker tokens with <code>POST /agent/tokens</code> and{" "}
+                  <code>POST /agent/tokens/revoke</code>; each agent receives least-privilege scopes and TTL limits.
+                </li>
+                <li>
+                  On every agent request, backend validates token signature, scope, expiry, and revocation before any
+                  read/write action executes.
+                </li>
+                <li>
+                  Startup and secret posture should be checked with <code>GET /admin/runtime/security</code> and{" "}
+                  <code>openclaw/scripts/verify-setup.sh</code> before live usage.
+                </li>
+              </ol>
+
+              <h3>Agent Roles And API Surface</h3>
+              <ul className="admin-doc-list">
+                <li>
+                  <strong>invoice-monitor</strong>: <code>GET /agent/invoices</code>,{" "}
+                  <code>GET /agent/reminders/summary</code>, <code>GET /agent/reminders/escalations</code> for
+                  read-only visibility.
+                </li>
+                <li>
+                  <strong>notification-sender</strong>: <code>POST /agent/reminders/run/once</code> plus{" "}
+                  <code>GET /agent/reminders/escalations</code> for reminder execution and follow-up visibility.
+                </li>
+                <li>
+                  <strong>creator-conversation</strong>: <code>GET /agent/conversations/{"{thread_id}"}/context</code>,{" "}
+                  <code>POST /agent/conversations/{"{thread_id}"}/suggest-reply</code>, and{" "}
+                  <code>POST /agent/conversations/{"{thread_id}"}/execute-action</code> for guarded reply operations.
+                </li>
+              </ul>
+
+              <h3>Policy, Safety, And Handoff</h3>
+              <p>
+                OpenClaw never bypasses backend policy gates. Conversation suggestions are scored against confidence/risk
+                thresholds, auto-reply caps, and provider/channel rules. If thresholds are not met, the thread is forced
+                to <strong>human handoff</strong> even when agent automation is enabled.
+              </p>
+              <div className="admin-doc-highlight">
+                <strong>Pipeline summary:</strong> 90-day earnings import → invoice state + dispatch readiness → reminder
+                evaluation/send runs → inbound provider replies → backend policy gate → agent suggest/execute → human
+                handoff when needed.
+              </div>
+            </SurfaceCard>
+
+            {/* ── Overview ── */}
+            <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="2">
               <h2>Overview</h2>
               <p>
                 EROS Invoicing Web combines earnings ingestion, invoice dispatch, creator portal access, payment
@@ -755,7 +819,7 @@ export default async function AdminPage({
             </SurfaceCard>
 
             {/* ── Reminder Cycle ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="2">
+            <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="3">
               <h2>Reminder Cycle</h2>
               <p>
                 Reminder runs are operator-triggered from this dashboard. For live sends, use the two-step workflow:
@@ -796,7 +860,7 @@ export default async function AdminPage({
             </SurfaceCard>
 
             {/* ── Eligibility ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="3">
+            <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="4">
               <h2>Who Gets Reminded</h2>
               <p>An invoice is eligible for a reminder when <strong>all</strong> of the following are true:</p>
               <ol className="admin-doc-list">
@@ -924,38 +988,6 @@ export default async function AdminPage({
                 <strong>Security:</strong> Passkeys are 256-bit random tokens, stored as SHA-256 hashes. Sessions use
                 HMAC-SHA256 signed tokens with 2-hour expiry. Revoking a passkey immediately blocks all new and existing
                 sessions for that creator. Generating a new passkey also rotates active sessions for that creator.
-              </div>
-            </SurfaceCard>
-
-            {/* ── Configuration ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>OpenClaw Agent Operations</h2>
-              <p>
-                OpenClaw agents use broker-token scoped <code>/agent/*</code> routes. They sit on top of the same invoice,
-                reminder, and conversation state used by this dashboard, so imported 90-day data is immediately available to
-                each agent workflow.
-              </p>
-              <ul className="admin-doc-list">
-                <li>
-                  <strong>invoice-monitor</strong>: read-only invoice and reminder visibility via <code>/agent/invoices</code>{" "}
-                  and <code>/agent/reminders/summary</code>
-                </li>
-                <li>
-                  <strong>notification-sender</strong>: reminder evaluation/sending via <code>/agent/reminders/run/once</code>{" "}
-                  and escalation visibility
-                </li>
-                <li>
-                  <strong>creator-conversation</strong>: thread context, suggestion, and execute-action calls for
-                  policy-governed replies
-                </li>
-              </ul>
-              <p>
-                Conversation actions never bypass backend policy checks. If confidence/risk thresholds are not met, threads
-                are forced to human handoff even when agents are enabled.
-              </p>
-              <div className="admin-doc-highlight">
-                <strong>Pipeline summary:</strong> data import → invoice state → reminder planning/sending → inbound replies
-                → policy gate → agent suggestion/execute → human handoff when needed.
               </div>
             </SurfaceCard>
 
