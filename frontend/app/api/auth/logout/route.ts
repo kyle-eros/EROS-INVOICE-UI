@@ -1,13 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { sessionCookieOptions } from "../../../../lib/session-cookies";
 
-export async function POST() {
+export async function POST(request: NextRequest) {
   const response = NextResponse.json({ ok: true });
-  response.cookies.set("eros_session", "", {
-    httpOnly: true,
-    secure: process.env.COOKIE_SECURE !== "false",
-    sameSite: "strict",
-    maxAge: 0,
-    path: "/",
-  });
+  response.cookies.set("eros_session", "", sessionCookieOptions(request, 0));
   return response;
 }

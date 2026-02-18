@@ -1,29 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { backendConfirmPasskey } from "../../../../lib/api";
+import { mapAuthRouteError } from "../../../../lib/auth-errors";
+import { sessionCookieOptions } from "../../../../lib/session-cookies";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const passkey = body.passkey;
     if (!passkey || typeof passkey !== "string") {
-      return NextResponse.json({ error: "passkey required" }, { status: 400 });
+      return NextResponse.json({ error: "Passkey is required.", code: "BAD_REQUEST" }, { status: 400 });
     }
     const result = await backendConfirmPasskey(passkey);
     const response = NextResponse.json({
       creator_id: result.creator_id,
       creator_name: result.creator_name,
     });
-    response.cookies.set("eros_session", result.session_token, {
-      httpOnly: true,
-      secure: process.env.COOKIE_SECURE !== "false",
-      sameSite: "strict",
-      maxAge: 7200,
-      path: "/",
-    });
+    response.cookies.set("eros_session", result.session_token, sessionCookieOptions(request, 7200));
     return response;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "confirm failed";
-    const status = message.includes("401") ? 401 : message.includes("429") ? 429 : 500;
-    return NextResponse.json({ error: message }, { status });
+    const mapped = mapAuthRouteError(error, "creator_confirm");
+    return NextResponse.json(mapped.payload, { status: mapped.status });
   }
 }

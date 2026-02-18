@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="633" height="100" viewBox="0 0 633 100" fill="none" role="img" aria-label="EROS logo">
+  <text x="8" y="82" fill="#3c89dd" font-family="Avenir Next" font-size="92" font-style="italic" font-weight="800" letter-spacing="-2">e</text>
+  <text x="143" y="82" fill="#3c89dd" font-family="Avenir Next" font-size="92" font-style="italic" font-weight="800" letter-spacing="-2">r</text>
+  <text x="444" y="82" fill="#3c89dd" font-family="Avenir Next" font-size="92" font-style="italic" font-weight="800" letter-spacing="-2">s</text>
+
+  <g transform="translate(262 2)">
+    <circle cx="52" cy="8" r="8" fill="#3c89dd" />
+    <path
+      fill="#3c89dd"
+      fill-rule="evenodd"
+      d="M52 96L18 73C5 63 0 51 0 40C0 25 11 14 25 14C35 14 45 19 52 27C59 19 69 14 79 14C93 14 104 25 104 40C104 51 99 63 86 73L52 96ZM52 73L73 59L66 51L52 60L38 51L31 59L52 73Z"
+    />
+  </g>
+</svg>

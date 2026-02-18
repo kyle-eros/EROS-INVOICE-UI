@@ -9,6 +9,7 @@ import { EmptyState } from "../components/EmptyState";
 import { StatusBadge, type StatusTone } from "../components/StatusBadge";
 import { SurfaceCard } from "../components/SurfaceCard";
 import {
+  listAdminCreators,
   generatePasskey,
   getReminderSummary,
   listPasskeys,
@@ -16,6 +17,7 @@ import {
   listTasks,
   revokePasskey,
   runReminderCycle,
+  type AdminCreatorDirectoryItem,
   type PasskeyListItem,
   type ReminderEscalation,
   type ReminderSummary,
@@ -54,6 +56,7 @@ interface AdminPageSearchParams {
   reminderRun?: string;
   mode?: string;
   passkeyGen?: string;
+  passkeyGenReason?: string;
   passkeyRevoke?: string;
   generatedPasskey?: string;
   generatedCreator?: string;
@@ -77,21 +80,47 @@ async function generatePasskeyAction(formData: FormData) {
   "use server";
   const creatorId = (formData.get("creator_id") as string)?.trim();
   const creatorName = (formData.get("creator_name") as string)?.trim();
+  const forceIssueUnready = formData.get("force_issue_unready") === "on";
   if (!creatorId || !creatorName) {
-    redirect("/admin?passkeyGen=error");
+    redirect("/admin?passkeyGen=error&passkeyGenReason=missing_fields");
   }
   const cookieStore = await cookies();
   const adminToken = cookieStore.get("admin_session")?.value;
   if (!adminToken) {
     redirect("/admin/gate");
   }
+
+  let targetCreatorId = creatorId;
+  let targetCreatorName = creatorName;
   try {
-    const result = await generatePasskey(creatorId, creatorName, adminToken);
+    const creators = await listAdminCreators(adminToken);
+    const matched = creators.creators.find((item) => item.creator_id === creatorId);
+    if (!matched && !forceIssueUnready) {
+      revalidatePath("/admin");
+      redirect("/admin?passkeyGen=error&passkeyGenReason=unknown_creator");
+    }
+    if (matched && !matched.ready_for_portal && !forceIssueUnready) {
+      revalidatePath("/admin");
+      redirect("/admin?passkeyGen=error&passkeyGenReason=no_dispatched_invoices");
+    }
+    if (matched) {
+      targetCreatorId = matched.creator_id;
+      targetCreatorName = matched.creator_name;
+    }
+  } catch {
+    if (!forceIssueUnready) {
+      revalidatePath("/admin");
+      redirect("/admin?passkeyGen=error&passkeyGenReason=directory_unavailable");
+    }
+  }
+
+  try {
+    const result = await generatePasskey(targetCreatorId, targetCreatorName, adminToken);
     revalidatePath("/admin");
-    redirect(`/admin?passkeyGen=success&generatedPasskey=${encodeURIComponent(result.passkey)}&generatedCreator=${encodeURIComponent(creatorName)}`);
+    redirect(`/admin?passkeyGen=success&generatedPasskey=${encodeURIComponent(result.passkey)}&generatedCreator=${encodeURIComponent(targetCreatorName)}`);
   } catch {
     revalidatePath("/admin");
-    redirect("/admin?passkeyGen=error");
+    redirect("/admin?passkeyGen=error&passkeyGenReason=generate_failed");
   }
 }
 
@@ -148,6 +177,25 @@ function runMessage(reminderRun: string | undefined, mode: string): string | nul
   return null;
 }
 
+function passkeyGenMessage(reason: string | undefined): string {
+  if (reason === "missing_fields") {
+    return "Creator ID and Creator Name are required.";
+  }
+  if (reason === "unknown_creator") {
+    return "Creator ID not found in invoice records. Use a known creator or enable manual override.";
+  }
+  if (reason === "no_dispatched_invoices") {
+    return "This creator has no dispatched invoices yet. Dispatch at least one invoice first, or use manual override.";
+  }
+  if (reason === "directory_unavailable") {
+    return "Creator validation is currently unavailable. Retry, or use manual override if urgent.";
+  }
+  if (reason === "generate_failed") {
+    return "Failed to generate passkey. Please try again.";
+  }
+  return "Failed to generate passkey. Please try again.";
+}
+
 export default async function AdminPage({
   searchParams,
 }: {
@@ -180,6 +228,8 @@ export default async function AdminPage({
 
   let passkeys: PasskeyListItem[] = [];
   let passkeyError: string | null = null;
+  let creatorDirectory: AdminCreatorDirectoryItem[] = [];
+  let creatorDirectoryError: string | null = null;
   const cookieStore = await cookies();
   const adminToken = cookieStore.get("admin_session")?.value ?? "";
 
@@ -192,10 +242,22 @@ export default async function AdminPage({
     passkeyError = error instanceof Error ? error.message : "Unable to load passkeys";
   }
 
+  try {
+    if (adminToken) {
+      const result = await listAdminCreators(adminToken);
+      creatorDirectory = result.creators;
+    }
+  } catch (error) {
+    creatorDirectoryError = error instanceof Error ? error.message : "Unable to load creator directory";
+  }
+
   const generatedPasskey = resolvedSearchParams.generatedPasskey ?? null;
   const generatedCreator = resolvedSearchParams.generatedCreator ?? null;
   const passkeyGenState = resolvedSearchParams.passkeyGen;
+  const passkeyGenReason = resolvedSearchParams.passkeyGenReason;
   const passkeyRevokeState = resolvedSearchParams.passkeyRevoke;
+  const passkeyGenError = passkeyGenState === "error" ? passkeyGenMessage(passkeyGenReason) : null;
+  const readyCreators = creatorDirectory.filter((creator) => creator.ready_for_portal);
 
   const latestTimestamp = getLatestTimestamp(tasks);
   const columns: DataColumn<TaskSummary>[] = [
@@ -356,14 +418,53 @@ export default async function AdminPage({
             <form action={generatePasskeyAction} className="passkey-mgmt__form">
               <div className="passkey-mgmt__field">
                 <label htmlFor="creator_id">Creator ID</label>
-                <input className="login-input" id="creator_id" name="creator_id" required placeholder="e.g. creator-001" />
+                <input
+                  className="login-input"
+                  id="creator_id"
+                  name="creator_id"
+                  list="creator-id-options"
+                  required
+                  placeholder="e.g. creator-001"
+                />
               </div>
               <div className="passkey-mgmt__field">
                 <label htmlFor="creator_name">Creator Name</label>
-                <input className="login-input" id="creator_name" name="creator_name" required placeholder="e.g. Jane Doe" />
+                <input
+                  className="login-input"
+                  id="creator_name"
+                  name="creator_name"
+                  list="creator-name-options"
+                  required
+                  placeholder="e.g. Jane Doe"
+                />
               </div>
+              <label className="muted-small" style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <input type="checkbox" name="force_issue_unready" />
+                Allow manual override (issue passkey even if creator is not portal-ready)
+              </label>
               <button type="submit" className="button-link">Generate Passkey</button>
             </form>
+
+            <datalist id="creator-id-options">
+              {readyCreators.map((creator) => (
+                <option key={creator.creator_id} value={creator.creator_id}>
+                  {creator.creator_name}
+                </option>
+              ))}
+            </datalist>
+            <datalist id="creator-name-options">
+              {readyCreators.map((creator) => (
+                <option key={creator.creator_id} value={creator.creator_name}>
+                  {creator.creator_id}
+                </option>
+              ))}
+            </datalist>
+            <p className="muted-small">
+              Recommended creators come from invoice records with at least one dispatched invoice.
+            </p>
+            {creatorDirectoryError ? (
+              <p className="muted-small">Creator validation unavailable: {creatorDirectoryError}</p>
+            ) : null}
 
             {passkeyGenState === "success" && generatedPasskey ? (
               <div>
@@ -371,8 +472,8 @@ export default async function AdminPage({
                 <div className="passkey-display">{generatedPasskey}</div>
                 <p className="passkey-warning">This passkey will not be shown again. Copy it now and send it to the creator.</p>
               </div>
-            ) : passkeyGenState === "error" ? (
-              <p className="login-error">Failed to generate passkey. Please try again.</p>
+            ) : passkeyGenError ? (
+              <p className="login-error">{passkeyGenError}</p>
             ) : null}
 
             {passkeyRevokeState === "success" ? (
@@ -462,7 +563,7 @@ export default async function AdminPage({
             <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="1">
               <h2>Overview</h2>
               <p>
-                When a creator has an unpaid invoice past its due date, OpenClaw automatically sends payment reminders via
+                When a creator has an unpaid invoice past its due date, the internal notifier automatically sends payment reminders via
                 email and SMS. Reminders continue on a schedule until the creator pays or the invoice is escalated for
                 manual follow-up.
               </p>
@@ -621,7 +722,7 @@ export default async function AdminPage({
               <div className="admin-doc-highlight">
                 <strong>Security:</strong> Passkeys are 256-bit random tokens, stored as SHA-256 hashes. Sessions use
                 HMAC-SHA256 signed tokens with 2-hour expiry. Revoking a passkey immediately blocks all new and existing
-                sessions for that creator.
+                sessions for that creator. Generating a new passkey also rotates active sessions for that creator.
               </div>
             </SurfaceCard>
 
@@ -643,24 +744,24 @@ export default async function AdminPage({
                   </thead>
                   <tbody>
                     <tr>
-                      <td><code>OPENCLAW_ENABLED</code></td>
+                      <td><code>NOTIFIER_ENABLED</code></td>
                       <td>Off</td>
                       <td>Master switch for live reminder sending. When off, live runs behave like test runs.</td>
                     </tr>
                     <tr>
-                      <td><code>OPENCLAW_DRY_RUN_DEFAULT</code></td>
+                      <td><code>NOTIFIER_DRY_RUN_DEFAULT</code></td>
                       <td>On</td>
                       <td>Default mode when triggering a reminder cycle via the API without specifying a mode.</td>
                     </tr>
                     <tr>
-                      <td><code>OPENCLAW_CHANNEL</code></td>
+                      <td><code>NOTIFIER_CHANNEL</code></td>
                       <td>email,sms</td>
                       <td>Which channels the system supports. Options: &ldquo;email&rdquo;, &ldquo;sms&rdquo;, or &ldquo;email,sms&rdquo;.</td>
                     </tr>
                     <tr>
-                      <td><code>CREATOR_MAGIC_LINK_SECRET</code></td>
-                      <td>dev-creator-secret</td>
-                      <td>Secret key for signing creator portal tokens. Must be changed for production.</td>
+                      <td><code>CREATOR_SESSION_SECRET</code></td>
+                      <td>dev-session-secret</td>
+                      <td>Secret key for signing creator session tokens. Must be changed for production.</td>
                     </tr>
                     <tr>
                       <td><code>CREATOR_PORTAL_BASE_URL</code></td>

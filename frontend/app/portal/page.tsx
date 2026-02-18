@@ -1,10 +1,11 @@
 import { cookies } from "next/headers";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { BrandWordmark } from "../components/BrandWordmark";
 import { DataTable, type DataColumn } from "../components/DataTable";
 import { StatusBadge } from "../components/StatusBadge";
 import { SurfaceCard } from "../components/SurfaceCard";
-import { getCreatorInvoicesBySession, type CreatorInvoiceItem } from "../../lib/api";
+import { BackendApiError, getCreatorInvoicesBySession, type CreatorInvoiceItem } from "../../lib/api";
 import { LogoutButton } from "./LogoutButton";
 
 const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -39,13 +40,72 @@ export default async function PortalPage() {
 
   let invoices: CreatorInvoiceItem[] = [];
   let creatorName = "Creator";
+  let accountNotReady = false;
+  let portalUnavailableMessage: string | null = null;
 
   try {
     const response = await getCreatorInvoicesBySession(sessionToken);
     invoices = response.invoices;
     creatorName = response.creator_name;
-  } catch {
-    redirect("/login");
+  } catch (error) {
+    if (error instanceof BackendApiError && (error.status === 401 || error.status === 403)) {
+      redirect("/login");
+    }
+    if (error instanceof BackendApiError && error.status === 404) {
+      accountNotReady = true;
+    } else if (error instanceof Error) {
+      portalUnavailableMessage = error.message;
+    } else {
+      portalUnavailableMessage = "Unable to load your invoices right now.";
+    }
+  }
+
+  if (accountNotReady) {
+    return (
+      <main id="main-content" className="page-wrap">
+        <div className="section-stack">
+          <header className="creator-header reveal-item">
+            <BrandWordmark size="sm" />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+              <h1>Your Invoices</h1>
+              <LogoutButton />
+            </div>
+            <p className="kicker">Your passkey was verified, but your portal data is not ready yet.</p>
+          </header>
+
+          <SurfaceCard as="section" className="creator-state-card reveal-item" data-delay="1">
+            <h2>Portal setup in progress</h2>
+            <p>
+              We could not find dispatched invoices for this account yet. Please contact your agency to confirm your creator
+              profile and invoice dispatch setup.
+            </p>
+          </SurfaceCard>
+        </div>
+      </main>
+    );
+  }
+
+  if (portalUnavailableMessage) {
+    return (
+      <main id="main-content" className="page-wrap">
+        <div className="section-stack">
+          <header className="creator-header reveal-item">
+            <BrandWordmark size="sm" />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+              <h1>Your Invoices</h1>
+              <LogoutButton />
+            </div>
+            <p className="kicker">We hit a temporary issue while loading your portal.</p>
+          </header>
+
+          <SurfaceCard as="section" className="creator-state-card reveal-item" data-delay="1">
+            <h2>Unable to load invoices</h2>
+            <p>Please refresh and try again. If this continues, contact your agency for support.</p>
+            <p className="muted-small">Details: {portalUnavailableMessage}</p>
+          </SurfaceCard>
+        </div>
+      </main>
+    );
   }
 
   const unfulfilledCount = invoices.filter((invoice) => invoice.notification_state !== "fulfilled").length;
@@ -79,6 +139,26 @@ export default async function PortalPage() {
       header: "Due Date",
       render: (invoice) => <span>{formatDate(invoice.due_date)}</span>,
     },
+    {
+      id: "issued",
+      header: "Issued",
+      render: (invoice) => <span>{formatDate(invoice.issued_at)}</span>,
+    },
+    {
+      id: "pdf",
+      header: "PDF",
+      render: (invoice) =>
+        invoice.has_pdf ? (
+          <Link
+            className="button-link button-link--secondary invoice-pdf-link"
+            href={`/portal/invoices/${encodeURIComponent(invoice.invoice_id)}`}
+          >
+            View PDF
+          </Link>
+        ) : (
+          <span className="muted-small">Unavailable</span>
+        ),
+    },
   ];
 
   return (
@@ -105,7 +185,7 @@ export default async function PortalPage() {
         <SurfaceCard as="section" className="invoicing-table-card reveal-item" data-delay="2">
           <div className="invoicing-table-card__head">
             <h2>Your Invoices</h2>
-            <p className="kicker">Review your invoices below. Once you&apos;ve submitted payment, mark the invoice as paid.</p>
+            <p className="kicker">Review invoice balances, due dates, and open each available PDF from the portal.</p>
           </div>
           <DataTable
             caption="Your invoices and payment status"

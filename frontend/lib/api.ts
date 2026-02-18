@@ -72,12 +72,14 @@ export interface CreatorInvoiceItem {
   amount_due: number;
   amount_paid: number;
   balance_due: number;
+  issued_at: string;
   due_date: string;
   status: "open" | "partial" | "paid" | "overdue" | "escalated";
   dispatch_id: string;
   dispatched_at: string;
   notification_state: "unseen" | "seen_unfulfilled" | "fulfilled";
   reminder_count: number;
+  has_pdf: boolean;
   last_reminder_at: string | null;
 }
 
@@ -89,11 +91,62 @@ export interface CreatorInvoicesResponse {
 
 const API_BASE_URL = process.env.INVOICING_API_BASE_URL ?? "http://localhost:8000";
 
-async function decodeJson<T>(response: Response, operation: string): Promise<T> {
-  if (!response.ok) {
-    throw new Error(`${operation} failed (${response.status})`);
+export class BackendApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "BackendApiError";
+    this.status = status;
   }
-  return (await response.json()) as T;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+async function decodeJson<T>(response: Response, operation: string): Promise<T> {
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const body = asRecord(payload);
+    const message =
+      (typeof body?.detail === "string" && body.detail) ||
+      (typeof body?.error === "string" && body.error) ||
+      (typeof body?.message === "string" && body.message) ||
+      `${operation} failed (${response.status})`;
+    throw new BackendApiError(message, response.status);
+  }
+  return payload as T;
+}
+
+async function decodeAuthJson<T>(response: Response, fallbackMessage: string): Promise<T> {
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const body = asRecord(payload);
+    const message =
+      (typeof body?.detail === "string" && body.detail) ||
+      (typeof body?.error === "string" && body.error) ||
+      (typeof body?.message === "string" && body.message) ||
+      fallbackMessage;
+    throw new BackendApiError(message, response.status);
+  }
+
+  return payload as T;
 }
 
 export async function listTasks(): Promise<TaskSummary[]> {
@@ -141,13 +194,8 @@ export async function runReminderCycle(payload: ReminderRunRequest = {}): Promis
 }
 
 export async function getCreatorInvoices(token: string): Promise<CreatorInvoicesResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/creator/${encodeURIComponent(token)}/invoices`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-
-  return decodeJson<CreatorInvoicesResponse>(response, "Creator invoices");
+  // Legacy alias: this now expects a creator session token and uses the session endpoint.
+  return getCreatorInvoicesBySession(token);
 }
 
 // --- Passkey Auth (server-side → backend) ---
@@ -159,7 +207,7 @@ export async function backendLookupPasskey(passkey: string): Promise<{ creator_i
     body: JSON.stringify({ passkey }),
     cache: "no-store",
   });
-  return decodeJson(response, "Passkey lookup");
+  return decodeAuthJson(response, "Passkey lookup failed");
 }
 
 export async function backendConfirmPasskey(passkey: string): Promise<{
@@ -174,7 +222,7 @@ export async function backendConfirmPasskey(passkey: string): Promise<{
     body: JSON.stringify({ passkey }),
     cache: "no-store",
   });
-  return decodeJson(response, "Passkey confirm");
+  return decodeAuthJson(response, "Passkey confirmation failed");
 }
 
 // --- Admin Auth (server-side → backend) ---
@@ -190,7 +238,7 @@ export async function backendAdminLogin(password: string): Promise<{
     body: JSON.stringify({ password }),
     cache: "no-store",
   });
-  return decodeJson(response, "Admin login");
+  return decodeAuthJson(response, "Admin login failed");
 }
 
 // --- Session-based Creator Data ---
@@ -205,6 +253,17 @@ export async function getCreatorInvoicesBySession(sessionToken: string): Promise
     cache: "no-store",
   });
   return decodeJson(response, "Creator invoices (session)");
+}
+
+export async function fetchCreatorInvoicePdfBySession(sessionToken: string, invoiceId: string): Promise<Response> {
+  return fetch(`${API_BASE_URL}/api/v1/invoicing/me/invoices/${encodeURIComponent(invoiceId)}/pdf`, {
+    method: "GET",
+    headers: {
+      Accept: "application/pdf",
+      Authorization: `Bearer ${sessionToken}`,
+    },
+    cache: "no-store",
+  });
 }
 
 // --- Passkey Management (admin-only) ---
@@ -239,6 +298,14 @@ export interface PasskeyListItem {
   created_at: string;
 }
 
+export interface AdminCreatorDirectoryItem {
+  creator_id: string;
+  creator_name: string;
+  invoice_count: number;
+  dispatched_invoice_count: number;
+  ready_for_portal: boolean;
+}
+
 export async function listPasskeys(adminToken: string): Promise<{ creators: PasskeyListItem[] }> {
   const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/passkeys`, {
     method: "GET",
@@ -249,6 +316,18 @@ export async function listPasskeys(adminToken: string): Promise<{ creators: Pass
     cache: "no-store",
   });
   return decodeJson(response, "List passkeys");
+}
+
+export async function listAdminCreators(adminToken: string): Promise<{ creators: AdminCreatorDirectoryItem[] }> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/admin/creators`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    cache: "no-store",
+  });
+  return decodeJson(response, "List admin creators");
 }
 
 export async function revokePasskey(
