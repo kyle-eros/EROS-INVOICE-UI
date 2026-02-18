@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from datetime import timedelta
+
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from .auth_store import (
@@ -8,7 +11,14 @@ from .auth_store import (
     SqlAlchemyAuthStateRepository,
 )
 from .broker_tokens import BrokerTokenError, BrokerTokenPayload, create_broker_token, decode_broker_token, encode_broker_token
-from .config import Settings, get_settings
+from .config import Settings, get_settings, runtime_secret_issues
+from .conversation_webhook_security import (
+    verify_bluebubbles_signature,
+    verify_sendgrid_signature,
+    verify_twilio_signature,
+    webhook_timestamp_within_window,
+)
+from .conversations import ConversationService, create_conversation_repository
 from .creator_tokens import CreatorTokenError, create_creator_token, decode_creator_token, encode_creator_token
 from .models import (
     AchExchangeRequest,
@@ -19,10 +29,21 @@ from .models import (
     AdminCreatorDirectoryResponse,
     AdminLoginRequest,
     AdminLoginResponse,
+    AgentConversationExecuteRequest,
+    AgentConversationExecuteResponse,
+    AgentConversationSuggestRequest,
+    AgentConversationSuggestResponse,
     ArtifactListResponse,
     BrokerTokenRequest,
     BrokerTokenResponse,
     BrokerTokenRevokeRequest,
+    ConversationHandoffRequest,
+    ConversationHandoffResponse,
+    ConversationInboundWebhookResponse,
+    ConversationManualReplyRequest,
+    ConversationReplyResponse,
+    ConversationThreadDetailResponse,
+    ConversationThreadListResponse,
     ConfirmResponse,
     CreatorDispatchAcknowledgeResponse,
     CreatorInvoicesResponse,
@@ -55,8 +76,11 @@ from .models import (
     ReconciliationCaseListResponse,
     ReconciliationCaseResolveRequest,
     ReconciliationCaseResolveResponse,
+    RuntimeSecurityStatusResponse,
     ReminderRunRequest,
     ReminderRunResponse,
+    ReminderEvaluateRequest,
+    ReminderSendRequest,
     ReminderSummaryResponse,
     RunOnceResponse,
     TaskDetail,
@@ -64,6 +88,7 @@ from .models import (
 )
 from .notifier import HttpNotifierSender, NotifierSender, StubNotifierSender
 from .pdf_renderer import render_invoice_pdf
+from .reminder_runs import ReminderWorkflowService, create_reminder_run_repository
 from .store import (
     CreatorNotFoundError,
     DispatchNotFoundError,
@@ -74,8 +99,10 @@ from .store import (
     ReconciliationCaseNotFoundError,
     TaskNotFoundError,
 )
+from .webhook_security import verify_payment_webhook_signature
 
 _settings = get_settings()
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix=f"{_settings.api_prefix}/invoicing", tags=["invoicing"])
 task_store = InMemoryTaskStore()
 
@@ -117,6 +144,20 @@ notifier_sender: NotifierSender = _create_notifier(_settings)
 # Backward-compatible alias for tests and older local tooling that still patch this symbol.
 openclaw_sender: NotifierSender = notifier_sender
 auth_repo: AuthStateRepository = _create_auth_repo(_settings)
+reminder_run_repo = create_reminder_run_repository(
+    backend=_settings.reminder_store_backend,
+    database_url=_settings.database_url,
+)
+reminder_workflow = ReminderWorkflowService(repository=reminder_run_repo, store=task_store)
+conversation_repo = create_conversation_repository(
+    backend=_settings.conversation_store_backend,
+    database_url=_settings.database_url,
+)
+conversation_service = ConversationService(
+    repository=conversation_repo,
+    store=task_store,
+    settings=_settings,
+)
 
 
 def _active_notifier_sender() -> NotifierSender:
@@ -129,9 +170,11 @@ def _active_notifier_sender() -> NotifierSender:
 def reset_runtime_state_for_tests() -> None:
     task_store.reset()
     auth_repo.reset()
+    reminder_run_repo.reset()
+    conversation_repo.reset()
 
 
-def _require_admin(request: Request) -> None:
+def _require_admin(request: Request):
     token = request.headers.get("Authorization", "").removeprefix("Bearer ")
     if not token:
         raise HTTPException(401, "admin session required")
@@ -141,6 +184,7 @@ def _require_admin(request: Request) -> None:
             raise CreatorTokenError("not an admin token")
     except CreatorTokenError as exc:
         raise HTTPException(401, str(exc)) from exc
+    return payload
 
 
 def _require_creator_session(request: Request) -> str:
@@ -182,6 +226,80 @@ def _client_ip(request: Request) -> str:
         return direct_ip
     trusted_ip = forwarded.split(",")[0].strip()
     return trusted_ip or direct_ip
+
+
+def _build_reminder_run_payload(payload: ReminderRunRequest | None) -> ReminderRunRequest:
+    return payload or ReminderRunRequest(dry_run=_settings.notifier_dry_run_default)
+
+
+def _validate_reminder_run_payload(payload: ReminderRunRequest) -> None:
+    if payload.limit is not None and payload.limit > _settings.reminder_run_limit_max:
+        raise HTTPException(400, f"limit cannot exceed {_settings.reminder_run_limit_max}")
+    if payload.now_override is not None and (not payload.dry_run) and (not _settings.reminder_allow_live_now_override):
+        raise HTTPException(400, "now_override is only allowed for dry_run")
+    if (not payload.dry_run) and _settings.reminder_live_requires_idempotency and not payload.idempotency_key:
+        raise HTTPException(400, "idempotency_key is required for live reminder runs")
+
+
+def _validate_reminder_evaluate_payload(payload: ReminderEvaluateRequest) -> None:
+    if payload.limit is not None and payload.limit > _settings.reminder_run_limit_max:
+        raise HTTPException(400, f"limit cannot exceed {_settings.reminder_run_limit_max}")
+
+
+def _enforce_reminder_trigger_rate_limit(actor_key: str) -> None:
+    allowed = task_store.check_and_record_reminder_trigger(
+        actor_key,
+        max_attempts=_settings.reminder_trigger_rate_limit_max,
+        window=timedelta(seconds=_settings.reminder_trigger_rate_limit_window_seconds),
+    )
+    if not allowed:
+        raise HTTPException(429, "too many reminder run requests, try again later")
+
+
+def _validate_conversation_webhook_result(source: str, verified: bool, reason: str | None) -> None:
+    if verified:
+        return
+    if _settings.conversation_webhook_signature_mode == "enforce":
+        raise HTTPException(401, f"invalid {source} webhook signature")
+    logger.warning(
+        "conversation webhook signature validation failed in log_only mode: source=%s reason=%s",
+        source,
+        reason or "unknown",
+    )
+
+
+def _require_conversation_provider(provider: str) -> None:
+    normalized = provider.strip().lower()
+    if not _settings.conversation_enabled:
+        raise HTTPException(503, "conversation pipeline is disabled")
+    if not _settings.conversation_provider_enabled(normalized):
+        raise HTTPException(503, f"{normalized} conversation provider is disabled")
+
+
+def _extract_payload_text(payload: dict[str, object], *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized:
+                return normalized
+    return ""
+
+
+def _reminder_summary_with_latest_run() -> ReminderSummaryResponse:
+    summary = task_store.get_reminder_summary()
+    latest = reminder_run_repo.get_latest_run()
+    if latest is None:
+        return summary
+    return summary.model_copy(
+        update={
+            "last_run_at": latest.run_at,
+            "last_run_dry_run": latest.dry_run,
+            "last_run_sent_count": latest.sent_count,
+            "last_run_failed_count": latest.failed_count,
+            "last_run_skipped_count": latest.skipped_count,
+        }
+    )
 
 
 @router.post("/preview", response_model=PreviewResponse, status_code=status.HTTP_201_CREATED)
@@ -290,10 +408,28 @@ def exchange_ach_token(payload: AchExchangeRequest, request: Request) -> AchExch
 
 
 @router.post("/payments/webhooks/{provider}", response_model=PaymentWebhookEventResponse)
-def ingest_payment_webhook(provider: str, payload: PaymentWebhookEventRequest) -> PaymentWebhookEventResponse:
+async def ingest_payment_webhook(
+    provider: str,
+    request: Request,
+    payload: PaymentWebhookEventRequest,
+) -> PaymentWebhookEventResponse:
     normalized_provider = provider.strip().lower()
     if not normalized_provider:
         raise HTTPException(400, "provider is required")
+    verification = verify_payment_webhook_signature(
+        settings=_settings,
+        provider=normalized_provider,
+        body=await request.body(),
+        headers=request.headers,
+    )
+    if not verification.verified:
+        if _settings.payment_webhook_signature_mode == "enforce":
+            raise HTTPException(401, "invalid webhook signature")
+        logger.warning(
+            "payment webhook signature validation failed in log_only mode: provider=%s reason=%s",
+            normalized_provider,
+            verification.reason or "unknown",
+        )
     return task_store.apply_payment_webhook(
         normalized_provider,
         payload,
@@ -309,20 +445,375 @@ def get_payment_invoice_status(invoice_id: str) -> PaymentInvoiceStatusResponse:
         raise HTTPException(status_code=404, detail=f"invoice not found: {invoice_id}") from exc
 
 
+@router.post("/webhooks/twilio/inbound", response_model=ConversationInboundWebhookResponse)
+async def ingest_twilio_inbound_webhook(request: Request) -> ConversationInboundWebhookResponse:
+    _require_conversation_provider("twilio")
+
+    form = await request.form()
+    form_map = {str(key): str(value) for key, value in form.items()}
+
+    timestamp_check = webhook_timestamp_within_window(
+        headers=request.headers,
+        max_age_seconds=_settings.conversation_webhook_max_age_seconds,
+    )
+    _validate_conversation_webhook_result("twilio", timestamp_check.verified, timestamp_check.reason)
+
+    signature_check = verify_twilio_signature(
+        settings=_settings,
+        url=str(request.url),
+        form_data=form_map,
+        headers=request.headers,
+    )
+    _validate_conversation_webhook_result("twilio", signature_check.verified, signature_check.reason)
+
+    provider_message_id = form_map.get("MessageSid", "").strip()
+    external_contact = form_map.get("From", "").strip()
+    body_text = form_map.get("Body", "").strip()
+    provider_thread_ref = form_map.get("ConversationSid") or form_map.get("SmsSid")
+
+    if not provider_message_id:
+        raise HTTPException(400, "MessageSid is required")
+    if not external_contact:
+        raise HTTPException(400, "From is required")
+    if not body_text:
+        raise HTTPException(400, "Body is required")
+
+    return conversation_service.ingest_inbound(
+        source="twilio",
+        channel="sms",
+        external_contact=external_contact,
+        body_text=body_text,
+        provider_message_id=provider_message_id,
+        provider_thread_ref=provider_thread_ref,
+        sender=_active_notifier_sender(),
+    )
+
+
+@router.post("/webhooks/twilio/status")
+async def ingest_twilio_status_webhook(request: Request) -> dict[str, object]:
+    _require_conversation_provider("twilio")
+
+    form = await request.form()
+    form_map = {str(key): str(value) for key, value in form.items()}
+
+    signature_check = verify_twilio_signature(
+        settings=_settings,
+        url=str(request.url),
+        form_data=form_map,
+        headers=request.headers,
+    )
+    _validate_conversation_webhook_result("twilio", signature_check.verified, signature_check.reason)
+
+    provider_message_id = form_map.get("MessageSid", "").strip()
+    message_status = form_map.get("MessageStatus", "").strip().lower()
+    if not provider_message_id:
+        raise HTTPException(400, "MessageSid is required")
+    if not message_status:
+        raise HTTPException(400, "MessageStatus is required")
+
+    delivery_state = "delivered" if message_status in {"delivered", "sent"} else "failed"
+    updated = conversation_service.update_delivery_status(
+        provider_message_id=provider_message_id,
+        delivery_state=delivery_state,
+    )
+    return {"updated": updated, "provider_message_id": provider_message_id, "delivery_state": delivery_state}
+
+
+@router.post("/webhooks/bluebubbles/inbound", response_model=ConversationInboundWebhookResponse)
+async def ingest_bluebubbles_inbound_webhook(request: Request) -> ConversationInboundWebhookResponse:
+    _require_conversation_provider("bluebubbles")
+
+    raw_body = await request.body()
+    timestamp_check = webhook_timestamp_within_window(
+        headers=request.headers,
+        max_age_seconds=_settings.conversation_webhook_max_age_seconds,
+    )
+    _validate_conversation_webhook_result("bluebubbles", timestamp_check.verified, timestamp_check.reason)
+
+    signature_check = verify_bluebubbles_signature(
+        settings=_settings,
+        body=raw_body,
+        headers=request.headers,
+    )
+    _validate_conversation_webhook_result("bluebubbles", signature_check.verified, signature_check.reason)
+
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "invalid bluebubbles inbound payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "invalid bluebubbles inbound payload")
+
+    message_payload = payload.get("message")
+    if isinstance(message_payload, dict):
+        source_payload = message_payload
+    else:
+        source_payload = payload
+
+    if source_payload.get("isFromMe") is True:
+        return ConversationInboundWebhookResponse(
+            accepted=False,
+            deduped=False,
+            thread_id="ignored_outbound",
+            message_id=None,
+        )
+
+    provider_message_id = _extract_payload_text(
+        source_payload,
+        "guid",
+        "messageGuid",
+        "message_id",
+        "id",
+    )
+    external_contact = _extract_payload_text(
+        source_payload,
+        "from",
+        "handle",
+        "sender",
+        "phoneNumber",
+        "address",
+    )
+    body_text = _extract_payload_text(source_payload, "text", "body", "message")
+    provider_thread_ref = _extract_payload_text(source_payload, "chatGuid", "chat_id", "conversation_id")
+
+    if not provider_message_id:
+        raise HTTPException(400, "bluebubbles message guid is required")
+    if not external_contact:
+        raise HTTPException(400, "bluebubbles sender is required")
+    if not body_text:
+        raise HTTPException(400, "bluebubbles message body is required")
+
+    return conversation_service.ingest_inbound(
+        source="bluebubbles",
+        channel="imessage",
+        external_contact=external_contact,
+        body_text=body_text,
+        provider_message_id=provider_message_id,
+        provider_thread_ref=provider_thread_ref or None,
+        sender=_active_notifier_sender(),
+    )
+
+
+@router.post("/webhooks/bluebubbles/status")
+async def ingest_bluebubbles_status_webhook(request: Request) -> dict[str, object]:
+    _require_conversation_provider("bluebubbles")
+
+    raw_body = await request.body()
+    signature_check = verify_bluebubbles_signature(
+        settings=_settings,
+        body=raw_body,
+        headers=request.headers,
+    )
+    _validate_conversation_webhook_result("bluebubbles", signature_check.verified, signature_check.reason)
+
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "invalid bluebubbles status payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "invalid bluebubbles status payload")
+
+    source_payload = payload.get("message")
+    if isinstance(source_payload, dict):
+        status_payload = source_payload
+    else:
+        status_payload = payload
+
+    provider_message_id = _extract_payload_text(
+        status_payload,
+        "guid",
+        "messageGuid",
+        "message_id",
+        "id",
+    )
+    delivery_event = _extract_payload_text(status_payload, "status", "deliveryState", "event")
+
+    if not provider_message_id:
+        raise HTTPException(400, "bluebubbles message guid is required")
+    if not delivery_event:
+        raise HTTPException(400, "bluebubbles status is required")
+
+    normalized_event = delivery_event.lower()
+    if normalized_event in {"sent", "delivered", "read"}:
+        delivery_state = "delivered"
+    elif normalized_event in {"queued", "processing", "accepted"}:
+        delivery_state = "sent"
+    else:
+        delivery_state = "failed"
+
+    updated = conversation_service.update_delivery_status(
+        provider_message_id=provider_message_id,
+        delivery_state=delivery_state,
+    )
+    return {"updated": updated, "provider_message_id": provider_message_id, "delivery_state": delivery_state}
+
+
+@router.post("/webhooks/sendgrid/inbound", response_model=ConversationInboundWebhookResponse)
+async def ingest_sendgrid_inbound_webhook(request: Request) -> ConversationInboundWebhookResponse:
+    _require_conversation_provider("sendgrid")
+
+    signature_check = verify_sendgrid_signature(settings=_settings, headers=request.headers)
+    _validate_conversation_webhook_result("sendgrid", signature_check.verified, signature_check.reason)
+
+    form = await request.form()
+    form_map = {str(key): str(value) for key, value in form.items()}
+
+    provider_message_id = (
+        form_map.get("message_id")
+        or form_map.get("Message-Id")
+        or form_map.get("headers")
+        or ""
+    ).strip()
+    external_contact = (form_map.get("from") or form_map.get("sender") or "").strip()
+    body_text = (form_map.get("text") or form_map.get("subject") or "").strip()
+    if not provider_message_id:
+        provider_message_id = f"sendgrid-{hash((external_contact, body_text, str(request.url))) & 0xFFFFFFFF:08x}"
+
+    if not external_contact:
+        raise HTTPException(400, "from is required")
+    if not body_text:
+        raise HTTPException(400, "text is required")
+
+    return conversation_service.ingest_inbound(
+        source="sendgrid",
+        channel="email",
+        external_contact=external_contact,
+        body_text=body_text,
+        provider_message_id=provider_message_id,
+        provider_thread_ref=None,
+        sender=_active_notifier_sender(),
+    )
+
+
+@router.post("/webhooks/sendgrid/status")
+async def ingest_sendgrid_status_webhook(request: Request) -> dict[str, object]:
+    _require_conversation_provider("sendgrid")
+
+    signature_check = verify_sendgrid_signature(settings=_settings, headers=request.headers)
+    _validate_conversation_webhook_result("sendgrid", signature_check.verified, signature_check.reason)
+
+    payload = await request.json()
+    if not isinstance(payload, list):
+        raise HTTPException(400, "expected a list of status events")
+
+    updated_count = 0
+    for event in payload:
+        if not isinstance(event, dict):
+            continue
+        provider_message_id = str(event.get("sg_message_id") or event.get("smtp-id") or "").strip()
+        delivery_event = str(event.get("event") or "").strip().lower()
+        if not provider_message_id or not delivery_event:
+            continue
+        delivery_state = "delivered" if delivery_event in {"delivered", "processed"} else "failed"
+        updated = conversation_service.update_delivery_status(
+            provider_message_id=provider_message_id,
+            delivery_state=delivery_state,
+        )
+        if updated:
+            updated_count += 1
+
+    return {"updated_count": updated_count}
+
+
 @router.get("/reminders/summary", response_model=ReminderSummaryResponse)
-def get_reminder_summary() -> ReminderSummaryResponse:
-    return task_store.get_reminder_summary()
+def get_reminder_summary(request: Request) -> ReminderSummaryResponse:
+    _require_admin(request)
+    return _reminder_summary_with_latest_run()
 
 
 @router.post("/reminders/run/once", response_model=ReminderRunResponse)
-def run_reminders_once(payload: ReminderRunRequest | None = None) -> ReminderRunResponse:
-    request_payload = payload or ReminderRunRequest(dry_run=_settings.notifier_dry_run_default)
-    return task_store.run_reminders(request_payload, _active_notifier_sender())
+def run_reminders_once(request: Request, payload: ReminderRunRequest | None = None) -> ReminderRunResponse:
+    admin_payload = _require_admin(request)
+    request_payload = _build_reminder_run_payload(payload)
+    _validate_reminder_run_payload(request_payload)
+    _enforce_reminder_trigger_rate_limit(f"admin:{admin_payload.creator_id}")
+    try:
+        return reminder_workflow.run_once(
+            request_payload,
+            sender=_active_notifier_sender(),
+            actor_type="admin",
+            actor_id=admin_payload.creator_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/reminders/evaluate", response_model=ReminderRunResponse)
+def evaluate_reminders(request: Request, payload: ReminderEvaluateRequest | None = None) -> ReminderRunResponse:
+    admin_payload = _require_admin(request)
+    request_payload = payload or ReminderEvaluateRequest()
+    _validate_reminder_evaluate_payload(request_payload)
+    _enforce_reminder_trigger_rate_limit(f"admin:{admin_payload.creator_id}")
+    return reminder_workflow.evaluate(
+        request_payload,
+        actor_type="admin",
+        actor_id=admin_payload.creator_id,
+    )
+
+
+@router.post("/reminders/runs/{run_id}/send", response_model=ReminderRunResponse)
+def send_evaluated_reminders(run_id: str, request: Request, payload: ReminderSendRequest | None = None) -> ReminderRunResponse:
+    _require_admin(request)
+    max_messages = payload.max_messages if payload is not None else None
+    try:
+        return reminder_workflow.send_run(
+            run_id,
+            sender=_active_notifier_sender(),
+            max_messages=max_messages,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, f"reminder run not found: {run_id}") from exc
 
 
 @router.get("/reminders/escalations", response_model=EscalationListResponse)
-def get_reminder_escalations() -> EscalationListResponse:
+def get_reminder_escalations(request: Request) -> EscalationListResponse:
+    _require_admin(request)
     return EscalationListResponse(items=task_store.list_escalations())
+
+
+@router.get("/admin/conversations", response_model=ConversationThreadListResponse)
+def list_admin_conversations(request: Request) -> ConversationThreadListResponse:
+    _require_admin(request)
+    return conversation_service.list_threads(limit=200)
+
+
+@router.get("/admin/conversations/{thread_id}", response_model=ConversationThreadDetailResponse)
+def get_admin_conversation_detail(thread_id: str, request: Request) -> ConversationThreadDetailResponse:
+    _require_admin(request)
+    try:
+        return conversation_service.get_thread_detail(thread_id)
+    except KeyError as exc:
+        raise HTTPException(404, f"conversation thread not found: {thread_id}") from exc
+
+
+@router.post("/admin/conversations/{thread_id}/handoff", response_model=ConversationHandoffResponse)
+def admin_handoff_conversation(
+    thread_id: str,
+    payload: ConversationHandoffRequest | None,
+    request: Request,
+) -> ConversationHandoffResponse:
+    _require_admin(request)
+    try:
+        return conversation_service.handoff_thread(thread_id, reason=payload.reason if payload else None)
+    except KeyError as exc:
+        raise HTTPException(404, f"conversation thread not found: {thread_id}") from exc
+
+
+@router.post("/admin/conversations/{thread_id}/reply", response_model=ConversationReplyResponse)
+def admin_reply_conversation(
+    thread_id: str,
+    payload: ConversationManualReplyRequest,
+    request: Request,
+) -> ConversationReplyResponse:
+    _require_admin(request)
+    try:
+        return conversation_service.send_manual_reply(
+            thread_id,
+            body_text=payload.body_text,
+            sender=_active_notifier_sender(),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, f"conversation thread not found: {thread_id}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -331,10 +822,14 @@ def get_reminder_escalations() -> EscalationListResponse:
 
 
 @router.post("/admin/login", response_model=AdminLoginResponse)
-def admin_login(payload: AdminLoginRequest) -> AdminLoginResponse:
+def admin_login(payload: AdminLoginRequest, request: Request) -> AdminLoginResponse:
+    ip = _client_ip(request)
+    if not auth_repo.check_rate_limit(ip):
+        raise HTTPException(429, "too many login attempts, try again later")
     if not _settings.admin_password:
         raise HTTPException(503, "admin password not configured")
     if payload.password != _settings.admin_password:
+        auth_repo.record_failed_attempt(ip)
         raise HTTPException(401, "invalid password")
     token_payload = create_creator_token(
         creator_id="__admin__",
@@ -353,6 +848,24 @@ def admin_login(payload: AdminLoginRequest) -> AdminLoginResponse:
 def admin_session(request: Request) -> dict:
     _require_admin(request)
     return {"authenticated": True}
+
+
+@router.get("/admin/runtime/security", response_model=RuntimeSecurityStatusResponse)
+def admin_runtime_security(request: Request) -> RuntimeSecurityStatusResponse:
+    _require_admin(request)
+    return RuntimeSecurityStatusResponse(
+        runtime_secret_guard_mode=_settings.runtime_secret_guard_mode,  # type: ignore[arg-type]
+        conversation_webhook_signature_mode=_settings.conversation_webhook_signature_mode,  # type: ignore[arg-type]
+        payment_webhook_signature_mode=_settings.payment_webhook_signature_mode,  # type: ignore[arg-type]
+        conversation_enabled=_settings.conversation_enabled,
+        notifier_enabled=_settings.notifier_enabled,
+        providers_enabled={
+            "twilio": _settings.conversation_provider_twilio_enabled,
+            "sendgrid": _settings.conversation_provider_sendgrid_enabled,
+            "bluebubbles": _settings.conversation_provider_bluebubbles_enabled,
+        },
+        runtime_secret_issues=list(runtime_secret_issues(_settings)),
+    )
 
 
 @router.get("/admin/creators", response_model=AdminCreatorDirectoryResponse)
@@ -546,7 +1059,7 @@ def get_my_invoice_pdf(invoice_id: str, request: Request) -> Response:
 @router.get("/agent/reminders/summary", response_model=ReminderSummaryResponse)
 def agent_reminder_summary(request: Request) -> ReminderSummaryResponse:
     _require_broker_token(request, "reminders:summary")
-    return task_store.get_reminder_summary()
+    return _reminder_summary_with_latest_run()
 
 
 @router.get("/agent/invoices", response_model=list[InvoiceRecord])
@@ -557,15 +1070,70 @@ def agent_list_invoices(request: Request) -> list[InvoiceRecord]:
 
 @router.post("/agent/reminders/run/once", response_model=ReminderRunResponse)
 def agent_run_reminders(request: Request, payload: ReminderRunRequest | None = None) -> ReminderRunResponse:
-    _require_broker_token(request, "reminders:run")
-    request_payload = payload or ReminderRunRequest(dry_run=_settings.notifier_dry_run_default)
-    return task_store.run_reminders(request_payload, _active_notifier_sender())
+    broker_payload = _require_broker_token(request, "reminders:run")
+    request_payload = _build_reminder_run_payload(payload)
+    _validate_reminder_run_payload(request_payload)
+    _enforce_reminder_trigger_rate_limit(f"agent:{broker_payload.agent_id}")
+    try:
+        return reminder_workflow.run_once(
+            request_payload,
+            sender=_active_notifier_sender(),
+            actor_type="agent",
+            actor_id=broker_payload.agent_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/agent/reminders/escalations", response_model=EscalationListResponse)
 def agent_list_escalations(request: Request) -> EscalationListResponse:
     _require_broker_token(request, "reminders:read")
     return EscalationListResponse(items=task_store.list_escalations())
+
+
+@router.get("/agent/conversations/{thread_id}/context", response_model=ConversationThreadDetailResponse)
+def agent_conversation_context(thread_id: str, request: Request) -> ConversationThreadDetailResponse:
+    _require_broker_token(request, "conversations:read")
+    try:
+        return conversation_service.get_thread_detail(thread_id)
+    except KeyError as exc:
+        raise HTTPException(404, f"conversation thread not found: {thread_id}") from exc
+
+
+@router.post("/agent/conversations/{thread_id}/suggest-reply", response_model=AgentConversationSuggestResponse)
+def agent_suggest_conversation_reply(
+    thread_id: str,
+    payload: AgentConversationSuggestRequest,
+    request: Request,
+) -> AgentConversationSuggestResponse:
+    _require_broker_token(request, "conversations:reply")
+    try:
+        return conversation_service.evaluate_agent_suggestion(
+            thread_id=thread_id,
+            reply_text=payload.reply_text,
+            confidence=payload.confidence,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, f"conversation thread not found: {thread_id}") from exc
+
+
+@router.post("/agent/conversations/{thread_id}/execute-action", response_model=AgentConversationExecuteResponse)
+def agent_execute_conversation_action(
+    thread_id: str,
+    payload: AgentConversationExecuteRequest,
+    request: Request,
+) -> AgentConversationExecuteResponse:
+    _require_broker_token(request, "conversations:reply")
+    try:
+        return conversation_service.execute_agent_action(
+            thread_id=thread_id,
+            action=payload.action,
+            reply_text=payload.reply_text,
+            confidence=payload.confidence,
+            sender=_active_notifier_sender(),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, f"conversation thread not found: {thread_id}") from exc
 
 
 # ---------------------------------------------------------------------------

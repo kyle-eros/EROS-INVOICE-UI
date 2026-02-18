@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -142,6 +143,20 @@ def call_json(client: TestClient, method: str, path: str, payload: dict[str, Any
     return response.json()
 
 
+def call_json_auth(
+    client: TestClient,
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    response = client.request(method, path, json=payload, headers=headers)
+    if not response.is_success:
+        raise RuntimeError(f"{method} {path} failed with {response.status_code}: {response.text}")
+    return response.json()
+
+
 def main() -> int:
     args = parse_args()
     if args.due_days < 0:
@@ -213,11 +228,27 @@ def main() -> int:
         elif reconciliation.get("status") != "match":
             strict_failed = True
 
+    os.environ.setdefault("ADMIN_PASSWORD", "cb-seed-admin-pw")
+    os.environ.setdefault("REMINDER_ALLOW_LIVE_NOW_OVERRIDE", "true")
+    from invoicing_web.config import get_settings  # noqa: E402
+
+    api_module._settings = get_settings()
+    api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
+    api_module.reminder_run_repo = api_module.create_reminder_run_repository(
+        backend=api_module._settings.reminder_store_backend,
+        database_url=api_module._settings.database_url,
+    )
+    api_module.reminder_workflow = api_module.ReminderWorkflowService(
+        repository=api_module.reminder_run_repo,
+        store=api_module.task_store,
+    )
     api_module.reset_runtime_state_for_tests()
     api_module.openclaw_sender = StubOpenClawSender(
         enabled=True, channel=",".join(channels)
     )
     client = TestClient(create_app())
+    admin_login = call_json(client, "POST", "/api/v1/invoicing/admin/login", {"password": os.environ["ADMIN_PASSWORD"]})
+    admin_headers = {"Authorization": f"Bearer {admin_login['session_token']}"}
 
     api_results: dict[str, Any] = {}
     api_results["invoices_upsert"] = call_json(client, "POST", "/api/v1/invoicing/invoices/upsert", invoice_payload)
@@ -253,7 +284,13 @@ def main() -> int:
         "now_override": now_override.isoformat().replace("+00:00", "Z"),
         "idempotency_key": "cb-seed-reminder-dry-001",
     }
-    api_results["reminders_dry_run"] = call_json(client, "POST", "/api/v1/invoicing/reminders/run/once", dry_run_payload)
+    api_results["reminders_dry_run"] = call_json_auth(
+        client,
+        "POST",
+        "/api/v1/invoicing/reminders/run/once",
+        headers=admin_headers,
+        payload=dry_run_payload,
+    )
 
     if args.run_live:
         live_payload = {
@@ -261,8 +298,20 @@ def main() -> int:
             "now_override": now_override.isoformat().replace("+00:00", "Z"),
             "idempotency_key": "cb-seed-reminder-live-001",
         }
-        api_results["reminders_live_run"] = call_json(client, "POST", "/api/v1/invoicing/reminders/run/once", live_payload)
-        api_results["reminders_live_run_idempotent"] = call_json(client, "POST", "/api/v1/invoicing/reminders/run/once", live_payload)
+        api_results["reminders_live_run"] = call_json_auth(
+            client,
+            "POST",
+            "/api/v1/invoicing/reminders/run/once",
+            headers=admin_headers,
+            payload=live_payload,
+        )
+        api_results["reminders_live_run_idempotent"] = call_json_auth(
+            client,
+            "POST",
+            "/api/v1/invoicing/reminders/run/once",
+            headers=admin_headers,
+            payload=live_payload,
+        )
 
     if args.simulate_payment_event and api_results["invoices_upsert"]["invoices"]:
         first_invoice = api_results["invoices_upsert"]["invoices"][0]
@@ -303,8 +352,18 @@ def main() -> int:
             "GET",
             f"/api/v1/invoicing/payments/invoices/{first_invoice_id}/status",
         )
-    api_results["reminders_summary"] = call_json(client, "GET", "/api/v1/invoicing/reminders/summary")
-    api_results["reminders_escalations"] = call_json(client, "GET", "/api/v1/invoicing/reminders/escalations")
+    api_results["reminders_summary"] = call_json_auth(
+        client,
+        "GET",
+        "/api/v1/invoicing/reminders/summary",
+        headers=admin_headers,
+    )
+    api_results["reminders_escalations"] = call_json_auth(
+        client,
+        "GET",
+        "/api/v1/invoicing/reminders/escalations",
+        headers=admin_headers,
+    )
 
     write_json(output_dir / "api_results.json", api_results)
 

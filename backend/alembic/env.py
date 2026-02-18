@@ -7,6 +7,8 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from invoicing_web.auth_store import AuthStateBase
+from invoicing_web.conversations import ConversationsBase
+from invoicing_web.reminder_runs import ReminderRunsBase
 
 config = context.config
 
@@ -17,7 +19,15 @@ database_url = os.getenv("DATABASE_URL")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
-target_metadata = getattr(AuthStateBase, "metadata", None)
+target_metadata = [
+    value
+    for value in (
+        getattr(AuthStateBase, "metadata", None),
+        getattr(ReminderRunsBase, "metadata", None),
+        getattr(ConversationsBase, "metadata", None),
+    )
+    if value is not None
+]
 
 
 def run_migrations_offline() -> None:

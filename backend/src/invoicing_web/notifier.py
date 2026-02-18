@@ -27,6 +27,15 @@ class ProviderSendRequest:
 
 
 @dataclass(frozen=True)
+class ProviderConversationRequest:
+    thread_id: str
+    contact_channel: ContactChannel
+    contact_target: str
+    message: str
+    idempotency_key: str | None = None
+
+
+@dataclass(frozen=True)
 class ProviderSendResult:
     status: ProviderResultStatus
     attempted_at: datetime
@@ -37,6 +46,7 @@ class ProviderSendResult:
 
 class NotifierSender(Protocol):
     def send_friendly_reminder(self, payload: ProviderSendRequest, *, dry_run: bool) -> ProviderSendResult: ...
+    def send_message(self, payload: ProviderConversationRequest, *, dry_run: bool) -> ProviderSendResult: ...
 
 
 class StubNotifierSender:
@@ -44,10 +54,10 @@ class StubNotifierSender:
         self._enabled = enabled
         normalized = channel.strip().lower()
         if not normalized:
-            self._channels = {"email", "sms"}
+            self._channels = {"email", "sms", "imessage"}
         else:
             parsed = {item.strip() for item in normalized.split(",") if item.strip()}
-            self._channels = parsed or {"email", "sms"}
+            self._channels = parsed or {"email", "sms", "imessage"}
 
     def send_friendly_reminder(self, payload: ProviderSendRequest, *, dry_run: bool) -> ProviderSendResult:
         attempted_at = datetime.now(timezone.utc)
@@ -80,6 +90,34 @@ class StubNotifierSender:
             )
 
         message_id = f"stub-{payload.invoice_id}-{int(attempted_at.timestamp())}"
+        return ProviderSendResult(status="sent", attempted_at=attempted_at, provider_message_id=message_id)
+
+    def send_message(self, payload: ProviderConversationRequest, *, dry_run: bool) -> ProviderSendResult:
+        attempted_at = datetime.now(timezone.utc)
+        if dry_run:
+            return ProviderSendResult(status="dry_run", attempted_at=attempted_at)
+        if not self._enabled:
+            return ProviderSendResult(
+                status="failed",
+                attempted_at=attempted_at,
+                error_code="notifier_disabled",
+                error_message="Notifier live delivery is disabled",
+            )
+        if payload.contact_channel not in self._channels:
+            return ProviderSendResult(
+                status="failed",
+                attempted_at=attempted_at,
+                error_code="channel_mismatch",
+                error_message=f"Configured channels are {', '.join(sorted(self._channels))}",
+            )
+        if "fail" in payload.contact_target.lower():
+            return ProviderSendResult(
+                status="failed",
+                attempted_at=attempted_at,
+                error_code="stub_delivery_failed",
+                error_message="Stub sender forced failure for contact target",
+            )
+        message_id = f"stub-msg-{payload.thread_id}-{int(attempted_at.timestamp())}"
         return ProviderSendResult(status="sent", attempted_at=attempted_at, provider_message_id=message_id)
 
 
@@ -149,6 +187,58 @@ class HttpNotifierSender:
             "idempotency_key": idempotency_key,
         }
 
+        return self._send_message(
+            channel=payload.contact_channel,
+            recipient=payload.contact_target,
+            message=message_body,
+            idempotency_key=idempotency_key,
+            attempted_at=attempted_at,
+            dry_run=dry_run,
+        )
+
+    def send_message(self, payload: ProviderConversationRequest, *, dry_run: bool) -> ProviderSendResult:
+        attempted_at = datetime.now(timezone.utc)
+        idempotency_key = payload.idempotency_key or f"eros-thread-{payload.thread_id}-{int(attempted_at.timestamp())}"
+        return self._send_message(
+            channel=payload.contact_channel,
+            recipient=payload.contact_target,
+            message=payload.message,
+            idempotency_key=idempotency_key,
+            attempted_at=attempted_at,
+            dry_run=dry_run,
+        )
+
+    def _send_message(
+        self,
+        *,
+        channel: ContactChannel,
+        recipient: str,
+        message: str,
+        idempotency_key: str,
+        attempted_at: datetime,
+        dry_run: bool,
+    ) -> ProviderSendResult:
+        if dry_run:
+            return ProviderSendResult(status="dry_run", attempted_at=attempted_at)
+
+        if channel not in self._channels:
+            return ProviderSendResult(
+                status="failed",
+                attempted_at=attempted_at,
+                error_code="channel_not_configured",
+                error_message=(
+                    f"Channel '{channel}' is not configured; "
+                    f"available channels: {', '.join(sorted(self._channels))}"
+                ),
+            )
+
+        request_payload = {
+            "channel": channel,
+            "recipient": recipient,
+            "message": message,
+            "idempotency_key": idempotency_key,
+        }
+
         try:
             response_data = self._post(request_payload)
             message_id = response_data.get("message_id")
@@ -158,9 +248,7 @@ class HttpNotifierSender:
                 provider_message_id=message_id,
             )
         except _NotifierSendError as exc:
-            masked = mask_contact_target(
-                payload.contact_target, payload.contact_channel
-            )
+            masked = mask_contact_target(recipient, channel)
             return ProviderSendResult(
                 status="failed",
                 attempted_at=attempted_at,
@@ -213,7 +301,7 @@ def mask_contact_target(contact_target: str, channel: ContactChannel) -> str:
             return f"*@{domain}"
         return f"{local[0]}***@{domain}"
 
-    if channel == "sms":
+    if channel in {"sms", "imessage"}:
         digits = "".join(ch for ch in normalized if ch.isdigit())
         if len(digits) >= 4:
             return f"***{digits[-4:]}"
@@ -222,4 +310,3 @@ def mask_contact_target(contact_target: str, channel: ContactChannel) -> str:
         return "*" * len(normalized)
 
     return f"{normalized[:2]}***{normalized[-2:]}"
-

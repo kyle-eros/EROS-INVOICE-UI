@@ -44,10 +44,10 @@ class StubOpenClawSender:
         self._enabled = enabled
         normalized = channel.strip().lower()
         if not normalized:
-            self._channels = {"email", "sms"}
+            self._channels = {"email", "sms", "imessage"}
         else:
             parsed = {item.strip() for item in normalized.split(",") if item.strip()}
-            self._channels = parsed or {"email", "sms"}
+            self._channels = parsed or {"email", "sms", "imessage"}
 
     def send_friendly_reminder(self, payload: ProviderSendRequest, *, dry_run: bool) -> ProviderSendResult:
         attempted_at = datetime.now(timezone.utc)
@@ -214,7 +214,7 @@ def mask_contact_target(contact_target: str, channel: ContactChannel) -> str:
             return f"*@{domain}"
         return f"{local[0]}***@{domain}"
 
-    if channel == "sms":
+    if channel in {"sms", "imessage"}:
         digits = "".join(ch for ch in normalized if ch.isdigit())
         if len(digits) >= 4:
             return f"***{digits[-4:]}"

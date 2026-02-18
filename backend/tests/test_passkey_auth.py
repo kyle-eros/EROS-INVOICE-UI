@@ -16,11 +16,21 @@ from invoicing_web.openclaw import StubOpenClawSender
 
 def _client() -> TestClient:
     os.environ["ADMIN_PASSWORD"] = "test-admin-pw"
+    os.environ["RUNTIME_SECRET_GUARD_MODE"] = "off"
+    os.environ["CONVERSATION_WEBHOOK_SIGNATURE_MODE"] = "off"
     api_module.openclaw_sender = StubOpenClawSender(enabled=True, channel="email,sms")
     # Recreate settings to pick up env var
     from invoicing_web.config import get_settings
     api_module._settings = get_settings()
     api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
+    api_module.reminder_run_repo = api_module.create_reminder_run_repository(
+        backend=api_module._settings.reminder_store_backend,
+        database_url=api_module._settings.database_url,
+    )
+    api_module.reminder_workflow = api_module.ReminderWorkflowService(
+        repository=api_module.reminder_run_repo,
+        store=api_module.task_store,
+    )
     api_module.reset_runtime_state_for_tests()
     return TestClient(create_app())
 
@@ -114,6 +124,19 @@ def test_admin_wrong_password_rejected() -> None:
     client = _client()
     resp = client.post("/api/v1/invoicing/admin/login", json={"password": "wrong-pw"})
     assert resp.status_code == 401
+
+
+def test_admin_login_rate_limit_blocks_repeated_failures() -> None:
+    client = _client()
+    for _ in range(5):
+        resp = client.post("/api/v1/invoicing/admin/login", json={"password": "wrong-pw"})
+        assert resp.status_code == 401
+
+    blocked = client.post("/api/v1/invoicing/admin/login", json={"password": "wrong-pw"})
+    assert blocked.status_code == 429
+
+    blocked_valid = client.post("/api/v1/invoicing/admin/login", json={"password": "test-admin-pw"})
+    assert blocked_valid.status_code == 429
 
 
 def test_admin_endpoints_require_auth() -> None:
@@ -248,6 +271,7 @@ def test_session_grants_invoice_access() -> None:
     assert data["creator_name"] == "Dana"
     assert len(data["invoices"]) == 1
     assert data["invoices"][0]["invoice_id"] == "inv-creator-004"
+    assert data["invoices"][0]["currency"] == "USD"
     assert data["invoices"][0]["issued_at"] == "2026-02-01"
     assert data["invoices"][0]["has_pdf"] is False
 
@@ -279,6 +303,7 @@ def test_creator_pdf_access_flow() -> None:
     assert invoices_resp.status_code == 200
     invoice_item = invoices_resp.json()["invoices"][0]
     assert invoice_item["invoice_id"] == "inv-creator-006"
+    assert invoice_item["currency"] == "USD"
     assert invoice_item["has_pdf"] is True
 
     pdf_resp = client.get(

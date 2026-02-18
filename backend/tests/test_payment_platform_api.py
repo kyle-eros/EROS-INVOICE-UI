@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
@@ -11,8 +15,18 @@ from invoicing_web.main import create_app
 
 def _client() -> TestClient:
     os.environ["ADMIN_PASSWORD"] = "test-admin-pw"
+    os.environ["RUNTIME_SECRET_GUARD_MODE"] = "off"
+    os.environ["CONVERSATION_WEBHOOK_SIGNATURE_MODE"] = "off"
     api_module._settings = get_settings()
     api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
+    api_module.reminder_run_repo = api_module.create_reminder_run_repository(
+        backend=api_module._settings.reminder_store_backend,
+        database_url=api_module._settings.database_url,
+    )
+    api_module.reminder_workflow = api_module.ReminderWorkflowService(
+        repository=api_module.reminder_run_repo,
+        store=api_module.task_store,
+    )
     api_module.reset_runtime_state_for_tests()
     api_module.notifier_sender = api_module._create_notifier(api_module._settings)
     api_module.openclaw_sender = api_module.notifier_sender
@@ -48,6 +62,22 @@ def _seed_invoice(client: TestClient, invoice_id: str = "inv-pay-001", amount_du
         },
     )
     assert upsert_resp.status_code == 200
+
+
+def _set_env(name: str, value: str | None) -> str | None:
+    previous = os.environ.get(name)
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+    return previous
+
+
+def _restore_env(name: str, previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = previous
 
 
 def test_checkout_session_and_status_flow() -> None:
@@ -158,6 +188,71 @@ def test_webhook_mismatch_creates_and_resolves_reconciliation_case() -> None:
     )
     assert resolve_resp.status_code == 200
     assert resolve_resp.json()["status"] == "resolved"
+
+
+def test_webhook_signature_enforced_rejects_missing_signature() -> None:
+    prev_mode = _set_env("PAYMENT_WEBHOOK_SIGNATURE_MODE", "enforce")
+    prev_secret = _set_env("PAYMENT_WEBHOOK_SECRET_STRIPE", "test-stripe-webhook-secret")
+    try:
+        client = _client()
+        _seed_invoice(client, "inv-pay-signature-001", 90.0)
+
+        webhook_resp = client.post(
+            "/api/v1/invoicing/payments/webhooks/stripe",
+            json={
+                "event_id": "wh-evt-signature-missing",
+                "event_type": "payment.succeeded",
+                "invoice_id": "inv-pay-signature-001",
+                "amount": 90.0,
+                "status": "succeeded",
+                "occurred_at": "2026-02-18T12:00:00Z",
+                "metadata": {"source": "test"},
+            },
+        )
+        assert webhook_resp.status_code == 401
+        assert "invalid webhook signature" in webhook_resp.json()["detail"]
+    finally:
+        _restore_env("PAYMENT_WEBHOOK_SIGNATURE_MODE", prev_mode)
+        _restore_env("PAYMENT_WEBHOOK_SECRET_STRIPE", prev_secret)
+
+
+def test_webhook_signature_enforced_accepts_valid_signature() -> None:
+    prev_mode = _set_env("PAYMENT_WEBHOOK_SIGNATURE_MODE", "enforce")
+    prev_secret = _set_env("PAYMENT_WEBHOOK_SECRET_STRIPE", "test-stripe-webhook-secret")
+    try:
+        client = _client()
+        _seed_invoice(client, "inv-pay-signature-002", 110.0)
+        payload = {
+            "event_id": "wh-evt-signature-valid",
+            "event_type": "payment.succeeded",
+            "invoice_id": "inv-pay-signature-002",
+            "amount": 110.0,
+            "status": "succeeded",
+            "occurred_at": "2026-02-18T12:05:00Z",
+            "metadata": {"source": "test"},
+        }
+        body = json.dumps(payload, separators=(",", ":"))
+        timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+        signature = hmac.new(
+            b"test-stripe-webhook-secret",
+            f"{timestamp}.{body}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        webhook_resp = client.post(
+            "/api/v1/invoicing/payments/webhooks/stripe",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Timestamp": timestamp,
+                "X-Webhook-Signature": signature,
+            },
+        )
+        assert webhook_resp.status_code == 200
+        assert webhook_resp.json()["applied"] is True
+    finally:
+        _restore_env("PAYMENT_WEBHOOK_SIGNATURE_MODE", prev_mode)
+        _restore_env("PAYMENT_WEBHOOK_SECRET_STRIPE", prev_secret)
 
 
 def test_ach_endpoints_require_admin_session() -> None:

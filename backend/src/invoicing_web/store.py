@@ -15,6 +15,7 @@ from .models import (
     AchLinkTokenResponse,
     Artifact,
     ArtifactListResponse,
+    ContactChannel,
     CreatorDispatchAcknowledgeResponse,
     CreatorInvoiceItem,
     CreatorInvoicesResponse,
@@ -125,6 +126,7 @@ class _InvoiceRecord:
     dispatched_at: datetime | None
     notification_state: str
     last_payment_at: datetime | None
+    last_reminder_attempt_at: datetime | None
     last_reminder_at: datetime | None
     updated_at: datetime
     detail: InvoiceDetailPayload | None
@@ -157,6 +159,34 @@ class _ReminderRunSnapshot:
     sent_count: int
     failed_count: int
     skipped_count: int
+
+
+@dataclass(frozen=True)
+class PlannedReminderChannel:
+    channel: str
+    recipient: str
+    payload: ProviderSendRequest
+
+
+@dataclass(frozen=True)
+class PlannedReminderAttempt:
+    invoice_id: str
+    dispatch_id: str | None
+    eligible: bool
+    reason: str
+    next_eligible_at: datetime | None
+    contact_target_masked: str | None
+    channels: tuple[PlannedReminderChannel, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlannedReminderRun:
+    run_at: datetime
+    evaluated_count: int
+    eligible_count: int
+    skipped_count: int
+    escalated_count: int
+    attempts: tuple[PlannedReminderAttempt, ...]
 
 
 @dataclass
@@ -235,6 +265,7 @@ class InMemoryTaskStore:
         self._revoked_creators: set[str] = set()
         self._login_attempts: dict[str, list[datetime]] = {}
         self._revoked_broker_tokens: set[str] = set()
+        self._reminder_trigger_attempts: dict[str, list[datetime]] = {}
 
     def reset(self) -> None:
         with self._lock:
@@ -268,6 +299,7 @@ class InMemoryTaskStore:
             self._revoked_creators.clear()
             self._login_attempts.clear()
             self._revoked_broker_tokens.clear()
+            self._reminder_trigger_attempts.clear()
 
     def generate_passkey(self, creator_id: str, creator_name: str) -> tuple[_PasskeyRecord, str]:
         with self._lock:
@@ -340,6 +372,25 @@ class InMemoryTaskStore:
     def is_broker_token_revoked(self, token_id: str) -> bool:
         with self._lock:
             return token_id in self._revoked_broker_tokens
+
+    def check_and_record_reminder_trigger(
+        self,
+        actor_key: str,
+        *,
+        max_attempts: int,
+        window: timedelta,
+    ) -> bool:
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            cutoff = now - window
+            attempts = self._reminder_trigger_attempts.get(actor_key, [])
+            recent = [ts for ts in attempts if ts > cutoff]
+            if len(recent) >= max_attempts:
+                self._reminder_trigger_attempts[actor_key] = recent
+                return False
+            recent.append(now)
+            self._reminder_trigger_attempts[actor_key] = recent
+            return True
 
     def create_preview(self, payload: PreviewRequest) -> _TaskRecord:
         with self._lock:
@@ -441,6 +492,7 @@ class InMemoryTaskStore:
                         dispatched_at=None,
                         notification_state="unseen",
                         last_payment_at=None,
+                        last_reminder_attempt_at=None,
                         last_reminder_at=None,
                         updated_at=now,
                         detail=item.detail.model_copy(deep=True) if item.detail is not None else None,
@@ -476,6 +528,33 @@ class InMemoryTaskStore:
                 self._refresh_invoice_status(record, now)
                 self._refresh_invoice_notification(record)
             return [self._to_invoice_record(record) for record in records]
+
+    def resolve_conversation_context(self, *, channel: ContactChannel, external_contact: str) -> tuple[str | None, str | None, str | None]:
+        with self._lock:
+            normalized_contact = self._normalize_contact_for_channel(channel, external_contact)
+            if not normalized_contact:
+                return None, None, None
+
+            candidates: list[tuple[bool, datetime, _InvoiceRecord]] = []
+            for dispatch in self._dispatches.values():
+                target = dispatch.recipient_email if channel == "email" else dispatch.recipient_phone
+                if not target:
+                    continue
+                if self._normalize_contact_for_channel(channel, target) != normalized_contact:
+                    continue
+                invoice = self._invoices.get(dispatch.invoice_id)
+                if invoice is None:
+                    continue
+                is_unpaid = invoice.balance_due > 0
+                candidates.append((is_unpaid, dispatch.dispatched_at, invoice))
+
+            if not candidates:
+                return None, None, None
+
+            # Prefer unpaid conversations, then latest dispatch timestamp.
+            best = max(candidates, key=lambda value: (value[0], value[1]))
+            invoice = best[2]
+            return invoice.creator_id, invoice.creator_name, invoice.invoice_id
 
     def dispatch_invoice(self, payload: InvoiceDispatchRequest) -> InvoiceDispatchResponse:
         with self._lock:
@@ -577,6 +656,7 @@ class InMemoryTaskStore:
                         amount_due=record.amount_due,
                         amount_paid=record.amount_paid,
                         balance_due=record.balance_due,
+                        currency=record.currency,
                         issued_at=record.issued_at,
                         due_date=record.due_date,
                         status=record.status,
@@ -585,6 +665,7 @@ class InMemoryTaskStore:
                         notification_state=record.notification_state,
                         reminder_count=record.reminder_count,
                         has_pdf=record.detail is not None,
+                        last_reminder_attempt_at=record.last_reminder_attempt_at,
                         last_reminder_at=record.last_reminder_at,
                     )
                 )
@@ -614,8 +695,11 @@ class InMemoryTaskStore:
                 creator_name=record.creator_name,
                 issued_at=record.issued_at,
                 due_date=record.due_date,
+                status=record.status,  # type: ignore[arg-type]
                 currency=record.currency,
                 amount_due=record.amount_due,
+                amount_paid=record.amount_paid,
+                balance_due=record.balance_due,
                 detail=record.detail.model_copy(deep=True),
             )
 
@@ -905,6 +989,137 @@ class InMemoryTaskStore:
                 last_run_skipped_count=snapshot.skipped_count if snapshot else None,
             )
 
+    def plan_reminders(
+        self,
+        *,
+        now_override: datetime | None = None,
+        limit: int | None = None,
+    ) -> PlannedReminderRun:
+        with self._lock:
+            now = now_override or datetime.now(timezone.utc)
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            else:
+                now = now.astimezone(timezone.utc)
+
+            records = sorted(self._invoices.values(), key=lambda value: (value.due_date, value.invoice_id))
+            decisions: list[tuple[_InvoiceRecord, _ReminderDecision]] = []
+
+            for record in records:
+                self._refresh_invoice_status(record, now)
+                self._refresh_invoice_notification(record)
+                decision = self._evaluate_reminder(record, now)
+                decisions.append((record, decision))
+
+            eligible_count = sum(1 for _, decision in decisions if decision.eligible)
+            processed_eligible = 0
+            attempts: list[PlannedReminderAttempt] = []
+
+            for record, decision in decisions:
+                dispatch = self._dispatches.get(record.dispatch_id or "") if record.dispatch_id else None
+                masked_targets = self._masked_dispatch_targets(dispatch)
+
+                if not decision.eligible:
+                    attempts.append(
+                        PlannedReminderAttempt(
+                            invoice_id=record.invoice_id,
+                            dispatch_id=record.dispatch_id,
+                            eligible=False,
+                            reason=decision.reason,
+                            next_eligible_at=decision.next_eligible_at,
+                            contact_target_masked=masked_targets,
+                        )
+                    )
+                    continue
+
+                if limit is not None and processed_eligible >= limit:
+                    attempts.append(
+                        PlannedReminderAttempt(
+                            invoice_id=record.invoice_id,
+                            dispatch_id=record.dispatch_id,
+                            eligible=False,
+                            reason="limit_reached",
+                            next_eligible_at=now + REMINDER_COOLDOWN,
+                            contact_target_masked=masked_targets,
+                        )
+                    )
+                    continue
+
+                processed_eligible += 1
+                channels: list[PlannedReminderChannel] = []
+                if dispatch is not None:
+                    for channel in dispatch.channels:
+                        recipient = dispatch.recipient_email if channel == "email" else dispatch.recipient_phone
+                        payload = ProviderSendRequest(
+                            invoice_id=record.invoice_id,
+                            creator_id=record.creator_id,
+                            creator_name=record.creator_name,
+                            contact_channel=channel,
+                            contact_target=recipient or "",
+                            currency=record.currency,
+                            amount_due=record.amount_due,
+                            balance_due=record.balance_due,
+                            due_date=record.due_date,
+                        )
+                        channels.append(
+                            PlannedReminderChannel(
+                                channel=channel,
+                                recipient=recipient or "",
+                                payload=payload,
+                            )
+                        )
+
+                attempts.append(
+                    PlannedReminderAttempt(
+                        invoice_id=record.invoice_id,
+                        dispatch_id=record.dispatch_id,
+                        eligible=True,
+                        reason="eligible",
+                        next_eligible_at=now,
+                        contact_target_masked=masked_targets,
+                        channels=tuple(channels),
+                    )
+                )
+
+            skipped_count = sum(1 for attempt in attempts if not attempt.eligible)
+            escalated_count = len(self._current_escalations(now))
+            return PlannedReminderRun(
+                run_at=now,
+                evaluated_count=len(records),
+                eligible_count=eligible_count,
+                skipped_count=skipped_count,
+                escalated_count=escalated_count,
+                attempts=tuple(attempts),
+            )
+
+    def apply_reminder_attempt_outcome(
+        self,
+        invoice_id: str,
+        *,
+        attempted_at: datetime,
+        all_channels_sent: bool,
+        dry_run: bool,
+    ) -> None:
+        with self._lock:
+            record = self._invoices.get(invoice_id)
+            if record is None:
+                raise InvoiceNotFoundError(invoice_id)
+
+            normalized_attempted_at = attempted_at
+            if normalized_attempted_at.tzinfo is None:
+                normalized_attempted_at = normalized_attempted_at.replace(tzinfo=timezone.utc)
+            else:
+                normalized_attempted_at = normalized_attempted_at.astimezone(timezone.utc)
+
+            if not dry_run:
+                record.last_reminder_attempt_at = normalized_attempted_at
+                record.updated_at = normalized_attempted_at
+                if all_channels_sent:
+                    record.reminder_count += 1
+                    record.last_reminder_at = normalized_attempted_at
+                self._refresh_invoice_status(record, normalized_attempted_at)
+                self._refresh_invoice_notification(record)
+
     def run_reminders(self, payload: ReminderRunRequest, sender: NotifierSender) -> ReminderRunResponse:
         with self._lock:
             if payload.idempotency_key and payload.idempotency_key in self._reminder_run_idempotency:
@@ -1015,6 +1230,11 @@ class InMemoryTaskStore:
                 attempted_at = now
                 summary_status: ReminderStatus
                 reason = "eligible"
+                next_eligible_at: datetime | None = None
+
+                if not payload.dry_run:
+                    record.last_reminder_attempt_at = attempted_at
+                    record.updated_at = attempted_at
 
                 if statuses and all(status == "dry_run" for status in statuses):
                     summary_status = "dry_run"
@@ -1027,10 +1247,13 @@ class InMemoryTaskStore:
                     record.updated_at = attempted_at
                     self._refresh_invoice_status(record, attempted_at)
                     self._refresh_invoice_notification(record)
+                    next_eligible_at = attempted_at + REMINDER_COOLDOWN
                 else:
                     summary_status = "failed"
                     failed_count += 1
                     reason = "provider_error"
+                    if not payload.dry_run:
+                        next_eligible_at = attempted_at + REMINDER_COOLDOWN
 
                 first_message_id = next((value.provider_message_id for value in channel_results if value.provider_message_id), None)
                 first_error_code = next((value.error_code for value in channel_results if value.error_code), None)
@@ -1045,7 +1268,7 @@ class InMemoryTaskStore:
                     provider_message_id=first_message_id,
                     error_code=first_error_code,
                     error_message=first_error_message,
-                    next_eligible_at=(attempted_at + REMINDER_COOLDOWN) if summary_status == "sent" else None,
+                    next_eligible_at=next_eligible_at,
                     contact_target_masked=masked_targets,
                     idempotency_key=payload.idempotency_key,
                     channel_results=channel_results,
@@ -1226,6 +1449,14 @@ class InMemoryTaskStore:
             return None
         return ", ".join(masked)
 
+    @staticmethod
+    def _normalize_contact_for_channel(channel: ContactChannel, value: str) -> str:
+        normalized = value.strip()
+        if channel == "email":
+            return normalized.lower()
+        digits = "".join(ch for ch in normalized if ch.isdigit())
+        return digits or normalized
+
     def _build_artifact(self, record: _TaskRecord) -> Artifact:
         payload = record.payload
         lines = [
@@ -1316,6 +1547,7 @@ class InMemoryTaskStore:
             dispatched_at=record.dispatched_at,
             notification_state=record.notification_state,
             last_payment_at=record.last_payment_at,
+            last_reminder_attempt_at=record.last_reminder_attempt_at,
             last_reminder_at=record.last_reminder_at,
             updated_at=record.updated_at,
         )
@@ -1338,8 +1570,9 @@ class InMemoryTaskStore:
         if now < due_at:
             return _ReminderDecision(eligible=False, reason="not_due_yet", next_eligible_at=due_at)
 
-        if record.last_reminder_at is not None:
-            next_allowed = record.last_reminder_at + REMINDER_COOLDOWN
+        cooldown_anchor = record.last_reminder_attempt_at or record.last_reminder_at
+        if cooldown_anchor is not None:
+            next_allowed = cooldown_anchor + REMINDER_COOLDOWN
             if now < next_allowed:
                 return _ReminderDecision(eligible=False, reason="cooldown_active", next_eligible_at=next_allowed)
 

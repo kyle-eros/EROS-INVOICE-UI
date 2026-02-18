@@ -5,6 +5,7 @@ from io import BytesIO
 from datetime import date
 
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
@@ -19,9 +20,12 @@ def _format_date(value: date) -> str:
     return value.strftime("%m-%d-%Y")
 
 
-def _format_currency(value: float | Decimal) -> str:
+def _format_currency(value: float | Decimal, currency: str) -> str:
     amount = Decimal(str(value)).quantize(CENTS, rounding=ROUND_HALF_UP)
-    return f"${amount:,.2f}"
+    normalized_currency = currency.strip().upper() or "USD"
+    if normalized_currency == "USD":
+        return f"${amount:,.2f}"
+    return f"{normalized_currency} {amount:,.2f}"
 
 
 def _format_split_percent(value: float) -> str:
@@ -71,6 +75,24 @@ def render_invoice_pdf(invoice: InvoicePdfContext) -> bytes:
         leading=14,
         textColor=colors.HexColor("#111827"),
     )
+    table_header_style = ParagraphStyle(
+        "invoice_table_header",
+        parent=body_style,
+        fontName="Helvetica-Bold",
+        fontSize=8.5,
+        leading=10,
+    )
+    table_cell_style = ParagraphStyle(
+        "invoice_table_cell",
+        parent=body_style,
+        fontSize=8.5,
+        leading=10,
+    )
+    table_numeric_style = ParagraphStyle(
+        "invoice_table_numeric",
+        parent=table_cell_style,
+        alignment=TA_RIGHT,
+    )
     thank_you_style = ParagraphStyle(
         "invoice_thank_you",
         parent=body_style,
@@ -85,6 +107,8 @@ def render_invoice_pdf(invoice: InvoicePdfContext) -> bytes:
     header_rows = [
         ["Invoice #:", invoice.invoice_id],
         ["Date of Issue:", _format_date(invoice.issued_at)],
+        ["Payment Due By:", _format_date(invoice.due_date)],
+        ["Current Status:", invoice.status.replace("_", " ").title()],
     ]
     header_table = Table(header_rows, colWidths=[1.5 * inch, 5.5 * inch], hAlign="LEFT")
     header_table.setStyle(
@@ -112,19 +136,26 @@ def render_invoice_pdf(invoice: InvoicePdfContext) -> bytes:
     story.append(Paragraph(invoice.detail.service_description, body_style))
     story.append(Spacer(1, 0.14 * inch))
 
-    line_rows: list[list[str]] = [
-        ["Platform", "Date Range", "Line Item", "Total", "Split (%)", "Split Amount"]
+    line_rows: list[list[object]] = [
+        [
+            Paragraph("Platform", table_header_style),
+            Paragraph("Date Range", table_header_style),
+            Paragraph("Line Item", table_header_style),
+            Paragraph("Gross Total", table_header_style),
+            Paragraph("Split (%)", table_header_style),
+            Paragraph("Split Amount", table_header_style),
+        ]
     ]
     for item in invoice.detail.line_items:
         split_amount = compute_split_amount(item.gross_total, item.split_percent)
         line_rows.append(
             [
-                item.platform,
-                f"{_format_date(item.period_start)} THRU {_format_date(item.period_end)}",
-                item.line_label,
-                _format_currency(item.gross_total),
-                _format_split_percent(item.split_percent),
-                _format_currency(split_amount),
+                Paragraph(item.platform, table_cell_style),
+                Paragraph(f"{_format_date(item.period_start)} to {_format_date(item.period_end)}", table_cell_style),
+                Paragraph(item.line_label, table_cell_style),
+                Paragraph(_format_currency(item.gross_total, invoice.currency), table_numeric_style),
+                Paragraph(_format_split_percent(item.split_percent), table_numeric_style),
+                Paragraph(_format_currency(split_amount, invoice.currency), table_numeric_style),
             ]
         )
 
@@ -138,13 +169,11 @@ def render_invoice_pdf(invoice: InvoicePdfContext) -> bytes:
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f3f4f6")),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111827")),
                 ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#d1d5db")),
                 ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafafa")]),
                 ("LEFTPADDING", (0, 0), (-1, -1), 4),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 4),
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
@@ -156,19 +185,26 @@ def render_invoice_pdf(invoice: InvoicePdfContext) -> bytes:
     story.append(Spacer(1, 0.16 * inch))
 
     total_table = Table(
-        [["Total Due", _format_currency(invoice.amount_due)]],
+        [
+            ["Invoice Total", _format_currency(invoice.amount_due, invoice.currency)],
+            ["Amount Paid", _format_currency(invoice.amount_paid, invoice.currency)],
+            ["Balance Due", _format_currency(invoice.balance_due, invoice.currency)],
+        ],
         colWidths=[5.25 * inch, 1.75 * inch],
         hAlign="LEFT",
     )
     total_table.setStyle(
         TableStyle(
             [
-                ("FONTNAME", (0, 0), (0, 0), "Helvetica-Bold"),
-                ("FONTNAME", (1, 0), (1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
                 ("FONTSIZE", (0, 0), (-1, -1), 11),
                 ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#111827")),
-                ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ("LINEABOVE", (0, 0), (-1, 0), 1, colors.HexColor("#9ca3af")),
+                ("LINEABOVE", (0, 2), (-1, 2), 1, colors.HexColor("#6b7280")),
+                ("FONTNAME", (0, 2), (-1, 2), "Helvetica-Bold"),
+                ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#f9fafb")),
                 ("LEFTPADDING", (0, 0), (-1, -1), 2),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 2),
                 ("TOPPADDING", (0, 0), (-1, -1), 6),
@@ -204,6 +240,13 @@ def render_invoice_pdf(invoice: InvoicePdfContext) -> bytes:
         )
     )
     story.append(payment_table)
+    if invoice.balance_due > 0:
+        story.append(
+            Paragraph(
+                f"Payment due by {_format_date(invoice.due_date)}.",
+                body_style,
+            )
+        )
     story.append(Paragraph("Thank you for your business!", thank_you_style))
 
     doc.build(story)

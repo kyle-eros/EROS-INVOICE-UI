@@ -16,7 +16,7 @@ FinancialAgentSlug = Literal[
 ]
 
 InvoiceStatus = Literal["open", "partial", "paid", "overdue", "escalated"]
-ContactChannel = Literal["email", "sms"]
+ContactChannel = Literal["email", "sms", "imessage"]
 ReminderStatus = Literal["sent", "skipped", "failed", "dry_run"]
 NotificationState = Literal["unseen", "seen_unfulfilled", "fulfilled"]
 PaymentMethodType = Literal["apple_pay", "card", "ach", "zelle_manual"]
@@ -29,6 +29,11 @@ PaymentIntentStatus = Literal[
 ]
 ReconciliationCaseStatus = Literal["open", "resolved"]
 PayoutStatus = Literal["pending", "in_transit", "settled", "failed"]
+ConversationThreadStatus = Literal["open", "agent_paused", "human_handoff", "closed"]
+ConversationDirection = Literal["inbound", "outbound"]
+ConversationSenderType = Literal["creator", "agent", "admin", "system"]
+ConversationDeliveryState = Literal["queued", "sent", "delivered", "failed", "received"]
+ConversationAction = Literal["respond", "handoff", "no_reply"]
 
 CENTS = Decimal("0.01")
 HUNDRED = Decimal("100")
@@ -306,6 +311,7 @@ class InvoiceRecord(BaseModel):
     dispatched_at: datetime | None = None
     notification_state: NotificationState
     last_payment_at: datetime | None = None
+    last_reminder_attempt_at: datetime | None = None
     last_reminder_at: datetime | None = None
     updated_at: datetime
 
@@ -381,8 +387,8 @@ class InvoiceDispatchRequest(BaseModel):
     def _validate_recipients(self) -> InvoiceDispatchRequest:
         if "email" in self.channels and not self.recipient_email:
             raise ValueError("recipient_email is required when email channel is included")
-        if "sms" in self.channels and not self.recipient_phone:
-            raise ValueError("recipient_phone is required when sms channel is included")
+        if ("sms" in self.channels or "imessage" in self.channels) and not self.recipient_phone:
+            raise ValueError("recipient_phone is required when sms or imessage channel is included")
         return self
 
 
@@ -491,6 +497,7 @@ class CreatorInvoiceItem(BaseModel):
     amount_due: float
     amount_paid: float
     balance_due: float
+    currency: str
     issued_at: date
     due_date: date
     status: InvoiceStatus
@@ -499,6 +506,7 @@ class CreatorInvoiceItem(BaseModel):
     notification_state: NotificationState
     reminder_count: int
     has_pdf: bool
+    last_reminder_attempt_at: datetime | None = None
     last_reminder_at: datetime | None = None
 
 
@@ -514,8 +522,11 @@ class InvoicePdfContext(BaseModel):
     creator_name: str
     issued_at: date
     due_date: date
+    status: InvoiceStatus
     currency: str
     amount_due: float
+    amount_paid: float
+    balance_due: float
     detail: InvoiceDetailPayload
 
 
@@ -817,6 +828,7 @@ class ReminderResult(BaseModel):
 
 
 class ReminderRunResponse(BaseModel):
+    run_id: str | None = None
     run_at: datetime
     dry_run: bool
     evaluated_count: int
@@ -840,6 +852,35 @@ class ReminderSummaryResponse(BaseModel):
     last_run_skipped_count: int | None = None
 
 
+class RuntimeSecurityStatusResponse(BaseModel):
+    runtime_secret_guard_mode: Literal["off", "warn", "enforce"]
+    conversation_webhook_signature_mode: Literal["off", "log_only", "enforce"]
+    payment_webhook_signature_mode: Literal["off", "log_only", "enforce"]
+    conversation_enabled: bool
+    notifier_enabled: bool
+    providers_enabled: dict[str, bool]
+    runtime_secret_issues: list[str]
+
+
+class ReminderEvaluateRequest(BaseModel):
+    limit: int | None = Field(default=None, ge=1, le=500)
+    now_override: datetime | None = None
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+
+    @field_validator("now_override")
+    @classmethod
+    def _normalize_override(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
+class ReminderSendRequest(BaseModel):
+    max_messages: int | None = Field(default=None, ge=1, le=5000)
+
+
 class EscalationItem(BaseModel):
     invoice_id: str
     creator_id: str
@@ -855,11 +896,135 @@ class EscalationListResponse(BaseModel):
     items: list[EscalationItem]
 
 
+class ConversationThreadItem(BaseModel):
+    thread_id: str
+    channel: ContactChannel
+    external_contact_masked: str
+    creator_id: str | None = None
+    creator_name: str | None = None
+    invoice_id: str | None = None
+    status: ConversationThreadStatus
+    auto_reply_count: int
+    last_message_preview: str | None = None
+    last_inbound_at: datetime | None = None
+    last_outbound_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationThreadListResponse(BaseModel):
+    items: list[ConversationThreadItem]
+
+
+class ConversationMessageItem(BaseModel):
+    message_id: str
+    direction: ConversationDirection
+    sender_type: ConversationSenderType
+    body_text: str
+    delivery_state: ConversationDeliveryState
+    provider_message_id: str | None = None
+    policy_reason: str | None = None
+    created_at: datetime
+
+
+class ConversationThreadDetailResponse(BaseModel):
+    thread: ConversationThreadItem
+    messages: list[ConversationMessageItem]
+
+
+class ConversationHandoffRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=512)
+
+    @field_validator("reason")
+    @classmethod
+    def _normalize_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class ConversationHandoffResponse(BaseModel):
+    thread_id: str
+    status: ConversationThreadStatus
+    updated_at: datetime
+
+
+class ConversationManualReplyRequest(BaseModel):
+    body_text: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("body_text")
+    @classmethod
+    def _normalize_body(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("body_text cannot be blank")
+        return normalized
+
+
+class ConversationReplyResponse(BaseModel):
+    thread_id: str
+    message_id: str
+    delivery_state: ConversationDeliveryState
+    provider_message_id: str | None = None
+
+
+class AgentConversationSuggestRequest(BaseModel):
+    reply_text: str = Field(min_length=1, max_length=2000)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    @field_validator("reply_text")
+    @classmethod
+    def _normalize_reply_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("reply_text cannot be blank")
+        return normalized
+
+
+class AgentConversationSuggestResponse(BaseModel):
+    action: ConversationAction
+    approved: bool
+    policy_reason: str
+    confidence: float
+
+
+class AgentConversationExecuteRequest(BaseModel):
+    action: Literal["send_reply", "handoff", "no_reply"]
+    reply_text: str | None = Field(default=None, max_length=2000)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    @field_validator("reply_text")
+    @classmethod
+    def _normalize_reply_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class AgentConversationExecuteResponse(BaseModel):
+    thread_id: str
+    action: Literal["send_reply", "handoff", "no_reply"]
+    status: str
+    message_id: str | None = None
+    policy_reason: str | None = None
+
+
+class ConversationInboundWebhookResponse(BaseModel):
+    accepted: bool
+    deduped: bool
+    thread_id: str
+    message_id: str | None = None
+
+
 ALLOWED_BROKER_SCOPES = frozenset({
     "invoices:read",
     "reminders:read",
     "reminders:run",
     "reminders:summary",
+    "conversations:read",
+    "conversations:reply",
 })
 
 
