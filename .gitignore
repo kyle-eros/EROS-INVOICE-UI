@@ -38,3 +38,6 @@ tmp/
 data/
 exports/
 *.log
+
+# Local source-data caches
+90d-earnings/.mypy_cache/
