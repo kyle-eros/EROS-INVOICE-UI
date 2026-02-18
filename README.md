@@ -294,7 +294,15 @@ CSV-to-invoice seed helpers are in `scripts/`:
 - `scripts/test_cb_seed_flow.sh`
 - `scripts/seed_grace_bennett.py`
 
-Artifacts default to `/tmp/cb-seed-artifacts`.
+By default, local seed scripts read source CSVs from the repo-local `data/` folder:
+- `data/CB Daily Sales Report 2026 - February 2026.csv`
+- `data/Creator statistics report 2026:01:17 to 2026:02:15.csv`
+
+You can override file locations with CLI flags:
+- `./scripts/test_cb_seed_flow.sh /path/to/sales.csv /path/to/creator.csv`
+- `python3 scripts/seed_grace_bennett.py --sales-csv /path/to/sales.csv --stats-csv /path/to/creator.csv`
+
+Artifacts default to `/tmp/cb-seed-artifacts` (or `/tmp/cb-seed-flow` for the shell helper).
 
 ## Governance
 

@@ -2,9 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR_DEFAULT="${ROOT_DIR}/data"
 
-SALES_CSV_DEFAULT="/Users/kylemerriman/EROS-CRM-TUI/eros-of-data/CB Daily Sales Report 2026 - February 2026.csv"
-CREATOR_CSV_DEFAULT="/Users/kylemerriman/EROS-CRM-TUI/eros-of-data/Creator statistics report 2026:01:17 to 2026:02:15.csv"
+SALES_CSV_DEFAULT="${DATA_DIR_DEFAULT}/CB Daily Sales Report 2026 - February 2026.csv"
+CREATOR_CSV_DEFAULT="${DATA_DIR_DEFAULT}/Creator statistics report 2026:01:17 to 2026:02:15.csv"
 
 SALES_CSV="${1:-${SALES_CSV_DEFAULT}}"
 CREATOR_CSV="${2:-${CREATOR_CSV_DEFAULT}}"
@@ -22,6 +23,11 @@ if [[ ! -f "${CREATOR_CSV}" ]]; then
   echo "error: creator csv not found: ${CREATOR_CSV}" >&2
   exit 1
 fi
+
+echo "Running CB seed flow with:"
+echo "  sales csv:   ${SALES_CSV}"
+echo "  creator csv: ${CREATOR_CSV}"
+echo "  output dir:  ${OUTPUT_DIR}"
 
 python3 "${ROOT_DIR}/scripts/seed_from_cb_reports.py" \
   --sales-csv "${SALES_CSV}" \

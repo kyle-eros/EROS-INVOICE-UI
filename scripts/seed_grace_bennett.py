@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import urllib.request
@@ -10,8 +11,10 @@ import urllib.error
 from datetime import date, datetime
 from pathlib import Path
 
-# Add backend src to path so we can import the cb_seed module
-sys.path.insert(0, str(Path("/Users/kylemerriman/EROS-CRM-TUI/EROS-Invoicing-Web/backend/src")))
+ROOT_DIR = Path(__file__).resolve().parents[1]
+BACKEND_SRC = ROOT_DIR / "backend" / "src"
+if str(BACKEND_SRC) not in sys.path:
+    sys.path.insert(0, str(BACKEND_SRC))
 
 from invoicing_web.cb_seed import (
     build_invoice_upsert_request,
@@ -24,14 +27,9 @@ from invoicing_web.cb_seed import (
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BASE_URL = "http://localhost:8000/api/v1/invoicing"
-
-SALES_CSV = Path(
-    "/Users/kylemerriman/EROS-CRM-TUI/eros-of-data/CB Daily Sales Report 2026 - February 2026.csv"
-)
-STATS_CSV = Path(
-    "/Users/kylemerriman/EROS-CRM-TUI/eros-of-data/Creator statistics report 2026:01:17 to 2026:02:15.csv"
-)
+BASE_URL_DEFAULT = "http://localhost:8000/api/v1/invoicing"
+SALES_CSV_DEFAULT = ROOT_DIR / "data" / "CB Daily Sales Report 2026 - February 2026.csv"
+STATS_CSV_DEFAULT = ROOT_DIR / "data" / "Creator statistics report 2026:01:17 to 2026:02:15.csv"
 
 CREATOR_ID = "creator-grace-bennett"
 CREATOR_NAME = "Grace Bennett"
@@ -39,6 +37,7 @@ CREATOR_TIMEZONE = "America/New_York"
 CONTACT_CHANNEL = "email"
 CONTACT_TARGET = "kyle@erosops.com"
 DUE_DAYS = 7
+DISPATCHED_AT = "2026-02-17T00:00:00Z"
 
 
 # ---------------------------------------------------------------------------
@@ -65,17 +64,45 @@ def post_json(url: str, data: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Seed Grace Bennett invoices from CB CSV reports.")
+    parser.add_argument("--base-url", default=BASE_URL_DEFAULT, help="Invoicing backend API base URL")
+    parser.add_argument("--sales-csv", type=Path, default=SALES_CSV_DEFAULT, help="Path to CB daily sales CSV")
+    parser.add_argument("--stats-csv", type=Path, default=STATS_CSV_DEFAULT, help="Path to creator stats CSV")
+    parser.add_argument("--creator-id", default=CREATOR_ID)
+    parser.add_argument("--creator-name", default=CREATOR_NAME)
+    parser.add_argument("--creator-timezone", default=CREATOR_TIMEZONE)
+    parser.add_argument("--contact-channel", default=CONTACT_CHANNEL, choices=["email"])
+    parser.add_argument("--contact-target", default=CONTACT_TARGET)
+    parser.add_argument("--due-days", type=int, default=DUE_DAYS)
+    parser.add_argument("--dispatched-at", default=DISPATCHED_AT)
+    return parser.parse_args()
+
+
+def _require_file(path: Path, label: str) -> None:
+    if path.is_file():
+        return
+    raise FileNotFoundError(
+        f"{label} not found: {path}\n"
+        f"Provide --{label.lower().replace(' ', '-')} or place the file under {ROOT_DIR / 'data'}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
+    args = parse_args()
+    _require_file(args.sales_csv, "sales csv")
+    _require_file(args.stats_csv, "stats csv")
+
     print("=" * 60)
     print("Seeding Grace Bennett Invoice Data")
     print("=" * 60)
 
     # 1. Parse CSVs
     print("\n[1/5] Parsing sales sessions...")
-    sessions, profile = parse_sales_sessions(SALES_CSV)
+    sessions, profile = parse_sales_sessions(args.sales_csv)
     print(f"  Total rows: {profile.total_rows}")
     print(f"  Included sessions: {profile.included_rows}")
     print(f"  Excluded: {profile.excluded_rows} ({profile.exclusion_reasons})")
@@ -83,7 +110,7 @@ def main() -> None:
     print(f"  Creator candidates: {profile.creator_candidates}")
 
     print("\n[2/5] Parsing creator stats...")
-    stats_rows = parse_creator_stats(STATS_CSV)
+    stats_rows = parse_creator_stats(args.stats_csv)
     for row in stats_rows:
         if row.total_earnings_net:
             print(f"  {row.creator_name}: Net ${row.total_earnings_net:,.2f}")
@@ -102,12 +129,12 @@ def main() -> None:
     print("\n[4/5] Building invoice upsert request...")
     upsert_request = build_invoice_upsert_request(
         sessions,
-        creator_name=CREATOR_NAME,
-        creator_id=CREATOR_ID,
-        creator_timezone=CREATOR_TIMEZONE,
-        contact_channel=CONTACT_CHANNEL,
-        contact_target=CONTACT_TARGET,
-        due_days=DUE_DAYS,
+        creator_name=args.creator_name,
+        creator_id=args.creator_id,
+        creator_timezone=args.creator_timezone,
+        contact_channel=args.contact_channel,
+        contact_target=args.contact_target,
+        due_days=args.due_days,
     )
     print(f"  Invoices to upsert: {len(upsert_request.invoices)}")
 
@@ -124,13 +151,13 @@ def main() -> None:
 
     # 4. POST upsert
     print("\n[5/5] Upserting invoices to backend...")
-    upsert_url = f"{BASE_URL}/invoices/upsert"
+    upsert_url = f"{args.base_url}/invoices/upsert"
     upsert_resp = post_json(upsert_url, {"invoices": invoices_payload})
     print(f"  Processed count: {upsert_resp['processed_count']}")
 
     # 5. Dispatch each invoice
     print("\nDispatching invoices...")
-    dispatch_url = f"{BASE_URL}/invoices/dispatch"
+    dispatch_url = f"{args.base_url}/invoices/dispatch"
     dispatched_count = 0
     total_amount = 0.0
 
@@ -139,8 +166,8 @@ def main() -> None:
         dispatch_payload = {
             "invoice_id": invoice_id,
             "channels": ["email"],
-            "recipient_email": CONTACT_TARGET,
-            "dispatched_at": "2026-02-17T00:00:00Z",
+            "recipient_email": args.contact_target,
+            "dispatched_at": args.dispatched_at,
             "idempotency_key": f"seed-{invoice_id}",
         }
         try:
