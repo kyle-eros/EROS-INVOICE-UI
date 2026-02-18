@@ -293,6 +293,7 @@ CSV-to-invoice seed helpers are in `scripts/`:
 - `scripts/seed_from_cb_reports.py`
 - `scripts/test_cb_seed_flow.sh`
 - `scripts/seed_grace_bennett.py`
+- `scripts/seed_from_90d_earnings.py`
 
 By default, local seed scripts read source CSVs from the repo-local `data/` folder:
 - `data/CB Daily Sales Report 2026 - February 2026.csv`
@@ -303,6 +304,12 @@ You can override file locations with CLI flags:
 - `python3 scripts/seed_grace_bennett.py --sales-csv /path/to/sales.csv --stats-csv /path/to/creator.csv`
 
 Artifacts default to `/tmp/cb-seed-artifacts` (or `/tmp/cb-seed-flow` for the shell helper).
+
+For demo data population from `90d-earnings/`:
+```bash
+python3 scripts/seed_from_90d_earnings.py --output-dir /tmp/eros-90d-seed-artifacts
+python3 scripts/seed_from_90d_earnings.py --apply --output-dir /tmp/eros-90d-seed-artifacts
+```
 
 ## Governance
 
