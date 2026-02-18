@@ -1,3 +1,14 @@
+# ARCHIVAL RESEARCH NOTE
+
+This document is historical research context and is not the canonical runtime guide.
+
+Use these canonical docs for current behavior and operations:
+- `README.md`
+- `openclaw/README.md`
+- `docs/cj-jack-repo-access.md`
+
+Last archival review: February 18, 2026.
+
 # Securely installing and running OpenClaw on macOS 15.6.1 on Apple Silicon
 
 ## Security reality check for your use case

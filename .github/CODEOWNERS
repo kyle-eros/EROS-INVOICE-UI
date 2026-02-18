@@ -1,0 +1,13 @@
+# Default owner
+* @kylemerriman
+
+# Service boundaries
+/backend/ @kylemerriman
+/frontend/ @kylemerriman
+/openclaw/ @kylemerriman
+/scripts/ @kylemerriman
+
+# Governance and deployment controls
+/.github/ @kylemerriman
+/.env.example @kylemerriman
+/**/alembic/** @kylemerriman
