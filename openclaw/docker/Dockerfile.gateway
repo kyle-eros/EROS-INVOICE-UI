@@ -1,22 +1,26 @@
 FROM node:20-alpine AS base
 
+RUN apk add --no-cache bash netcat-openbsd
+
 RUN addgroup -g 1001 -S openclaw && \
     adduser -S -u 1001 -G openclaw openclaw
 
 WORKDIR /app
 
-# Install OpenClaw gateway (placeholder - replace with actual package when available)
-# RUN npm install -g @openclaw/gateway@latest
+ARG OPENCLAW_CLI_NPM_PACKAGE=openclaw
+RUN npm install -g "${OPENCLAW_CLI_NPM_PACKAGE}"
 
 RUN mkdir -p /app/config /app/config/agents /app/transcripts && \
     chown -R openclaw:openclaw /app
+COPY entrypoint.sh /usr/local/bin/openclaw-entrypoint.sh
+RUN chmod +x /usr/local/bin/openclaw-entrypoint.sh && chown openclaw:openclaw /usr/local/bin/openclaw-entrypoint.sh
 
 USER openclaw
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1
+    CMD nc -z 127.0.0.1 8080 || exit 1
 
-# Entrypoint placeholder - replace with actual gateway binary
-CMD ["echo", "OpenClaw gateway placeholder - replace with actual entrypoint"]
+ENV OPENCLAW_GATEWAY_CMD="openclaw gateway --allow-unconfigured --bind loopback --port 8080"
+CMD ["/usr/local/bin/openclaw-entrypoint.sh"]

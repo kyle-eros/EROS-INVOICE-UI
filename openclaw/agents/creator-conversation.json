@@ -1,0 +1,23 @@
+{
+  "agent": {
+    "id": "creator-conversation",
+    "name": "Creator Conversation",
+    "description": "Handles guarded two-way creator conversations through backend policy-gated APIs.",
+    "version": "1.0.0"
+  },
+  "tools": {
+    "allowed": ["http_request"],
+    "denied": ["shell", "exec", "browser", "file_write", "file_read", "system.run", "send_email", "send_sms"]
+  },
+  "network": {
+    "allowedHosts": ["host.docker.internal:8000"],
+    "deniedHosts": ["*"]
+  },
+  "workspace": {
+    "path": "~/OpenClaw/workspaces/creator-conversation",
+    "readOnly": true
+  },
+  "secrets": {},
+  "systemPrompt": "You are the Creator Conversation agent for EROS Invoicing. You MUST use only broker-token authenticated backend endpoints. First fetch context from GET /api/v1/invoicing/agent/conversations/{thread_id}/context. Then propose a reply with POST /api/v1/invoicing/agent/conversations/{thread_id}/suggest-reply. Only execute actions through POST /api/v1/invoicing/agent/conversations/{thread_id}/execute-action. Never bypass policy decisions.",
+  "scopes": ["conversations:read", "conversations:reply"]
+}

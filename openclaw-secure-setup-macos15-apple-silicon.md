@@ -1,3 +1,14 @@
+# ARCHIVAL RESEARCH NOTE
+
+This guide is preserved as historical setup research and is not the canonical runtime spec.
+
+For current source-of-truth operations, use:
+- `README.md`
+- `openclaw/README.md`
+- `docs/cj-jack-repo-access.md`
+
+Last archival review: February 18, 2026.
+
 # OpenClaw Secure Setup Guide (macOS 15.6.1 • Apple Silicon / M4)
 
 This is a **step‑by‑step, handheld** checklist for installing OpenClaw on your **MacBook Pro (Apple M4, 32 GB, macOS 15.6.1 / 24G90)** and running it in the **safest practical way** for high‑risk automation (agents + external websites/APIs + your invoicing app).

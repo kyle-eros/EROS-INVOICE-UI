@@ -80,7 +80,7 @@ echo ""
 
 # --- 5. Backend API ---
 echo "5. Backend API Reachability"
-if curl -sf http://localhost:8000/api/v1/invoicing/reminders/summary &>/dev/null; then
+if curl -sf http://localhost:8000/api/v1/invoicing/tasks &>/dev/null; then
     pass "Backend API reachable at localhost:8000"
 else
     warn "Backend API not reachable at localhost:8000 — start the backend first"

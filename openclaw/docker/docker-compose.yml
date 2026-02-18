@@ -15,6 +15,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=100M
+      - /home/openclaw:size=100M
     volumes:
       - ../openclaw.json:/app/config/openclaw.json:ro
       - ../agents:/app/config/agents:ro
@@ -22,6 +23,7 @@ services:
     environment:
       - OPENCLAW_CONFIG=/app/config/openclaw.json
       - OPENCLAW_AGENTS_DIR=/app/config/agents
+      - OPENCLAW_GATEWAY_CMD=${OPENCLAW_GATEWAY_CMD:-openclaw gateway --allow-unconfigured --bind loopback --port 8080}
       - NODE_ENV=production
     networks:
       - openclaw-internal

@@ -1,143 +1,157 @@
-# OpenClaw Agent Configuration for EROS Invoicing
+# OpenClaw Runtime For EROS Invoicing
 
-OpenClaw is a self-hosted messaging gateway used by EROS Invoicing to deliver payment reminders via email and SMS. This directory contains the gateway configuration, agent definitions, Docker sandbox setup, and security scripts.
+This directory contains the OpenClaw gateway and agent definitions used by EROS Invoicing.
 
-## Architecture
+Source of truth for application behavior remains backend code and `README.md`. This document is the source of truth for OpenClaw runtime setup and scope boundaries.
 
-```
-+----------------------------------+
-|  OpenClaw Gateway (Docker)       |
-|  127.0.0.1:8080, sandbox=all    |
-|                                  |
-|  +---------------------+        |
-|  | Invoice Monitor     | (read)  |
-|  | Agent A             |        |
-|  +----------+----------+        |
-|             | broker token       |
-|  +----------v----------+        |
-|  | Notification        | (send)  |
-|  | Sender Agent B      |        |
-|  +----------+----------+        |
-+-----------+----------------------+
-            | HTTP via host.docker.internal
-+-----------v----------------------+
-|  EROS Backend (FastAPI)          |
-|  localhost:8000                   |
-|  /agent/* endpoints              |
-|  (broker-token authenticated)    |
-+----------------------------------+
-```
+Last verified against code: February 18, 2026.
 
-## Directory Structure
+## OpenClaw Role In This System
 
-```
+OpenClaw is an orchestration layer for scoped agent actions. It is not the business source of truth.
+
+Backend remains authoritative for:
+- reminder eligibility and durability,
+- conversation policy and handoff decisions,
+- provider webhook verification and channel mapping (SMS/email/iMessage),
+- session and broker-token auth enforcement,
+- payment/reconciliation state.
+
+## Directory Layout
+
+```text
 openclaw/
-├── openclaw.json                   # Master gateway configuration
+├── openclaw.json
 ├── agents/
-│   ├── invoice-monitor.json        # Read-only invoice monitoring agent
-│   └── notification-sender.json    # Send-only notification agent
+│   ├── invoice-monitor.json
+│   ├── notification-sender.json
+│   └── creator-conversation.json
 ├── docker/
-│   ├── docker-compose.yml          # Docker sandbox orchestration
-│   └── Dockerfile.gateway          # Custom gateway image
+│   ├── Dockerfile.gateway
+│   ├── docker-compose.yml
+│   └── entrypoint.sh
 ├── scripts/
-│   ├── verify-setup.sh             # Security verification script
-│   └── rotate-broker-token.sh      # Token rotation helper
-└── README.md                       # This file
+│   ├── rotate-broker-token.sh
+│   └── verify-setup.sh
+└── README.md
 ```
 
-## Quick Start
+## Agents And Responsibilities
 
-### 1. Prerequisites
+### 1) `invoice-monitor`
+- Purpose: read-only invoice/reminder observability.
+- Allowed tool: `http_request`.
+- Scope: `invoices:read`, `reminders:read`, `reminders:summary`.
 
-- Docker and Docker Compose installed
-- EROS backend running on localhost:8000
-- Environment variables configured (see below)
+### 2) `notification-sender`
+- Purpose: trigger reminder runs and monitor escalation queue.
+- Allowed tools: `http_request`, `send_email`, `send_sms`.
+- Scope: `reminders:run`, `reminders:read`.
 
-### 2. Environment Variables
+### 3) `creator-conversation`
+- Purpose: guarded two-way conversation workflow via backend policy gates.
+- Allowed tool: `http_request`.
+- Scope: `conversations:read`, `conversations:reply`.
 
-Set these before deploying:
+## Endpoint Access By Agent
+
+All endpoints below are backend paths under `/api/v1/invoicing`.
+
+### invoice-monitor
+- `GET /agent/reminders/summary`
+- `GET /agent/invoices`
+- `GET /agent/reminders/escalations`
+
+### notification-sender
+- `POST /agent/reminders/run/once`
+- `GET /agent/reminders/escalations`
+
+### creator-conversation
+- `GET /agent/conversations/{thread_id}/context`
+- `POST /agent/conversations/{thread_id}/suggest-reply`
+- `POST /agent/conversations/{thread_id}/execute-action`
+
+## Security Model
+
+### Network + Isolation
+- Gateway binds to loopback in Docker publish (`127.0.0.1:8080:8080`).
+- Containers are read-only with `no-new-privileges`.
+- Agent network allowlist points only to `host.docker.internal:8000`.
+
+### Tool Boundaries
+- Dangerous tools are denied by default (`shell`, `exec`, `browser`, `file_write`, `system.run`).
+- Conversation agent does not get direct email/sms tools; it must execute through backend API policy gates.
+
+### Auth Boundaries
+- Backend agent endpoints require broker tokens.
+- Tokens are scope-bound and revocable.
+- Admin creates/revokes broker tokens via backend admin-auth endpoints.
+
+## Setup
+
+### 1) Required environment
 
 ```bash
-export BROKER_TOKEN_SECRET="your-production-secret-here"
-export OPENCLAW_API_KEY="your-openclaw-api-key"
-export ADMIN_PASSWORD="your-admin-password"
+export BROKER_TOKEN_SECRET="replace-with-strong-secret"
+export OPENCLAW_API_KEY="replace-with-strong-key"
+export ADMIN_PASSWORD="replace-with-strong-password"
 export OPENCLAW_SENDER_TYPE="http"
 export OPENCLAW_API_BASE_URL="http://127.0.0.1:8080"
 ```
 
-### 3. Verify Security Posture
+### 2) Verify baseline
 
 ```bash
 ./scripts/verify-setup.sh
 ```
 
-Fix all FAIL items before proceeding.
-
-### 4. Start the Gateway
+### 3) Start gateway
 
 ```bash
 cd docker
 docker compose up -d
 ```
 
-### 5. Create Broker Tokens
+## Broker Token Rotation
 
 ```bash
-# Invoice Monitor agent
+# invoice-monitor
 ./scripts/rotate-broker-token.sh invoice-monitor "invoices:read,reminders:read,reminders:summary"
 
-# Notification Sender agent
+# notification-sender
 ./scripts/rotate-broker-token.sh notification-sender "reminders:run,reminders:read"
+
+# creator-conversation
+./scripts/rotate-broker-token.sh creator-conversation "conversations:read,conversations:reply"
 ```
 
-## Security Model
-
-### Defense-in-Depth Layers
-
-| Layer | Protection |
-|-------|-----------|
-| Network | Gateway bound to 127.0.0.1 only (Docker: `127.0.0.1:8080:8080`) |
-| Auth | HMAC-SHA256 broker tokens, short TTL (60min default), narrow scopes |
-| Isolation | Docker sandbox, read-only filesystem, `no-new-privileges` |
-| Least Privilege | Per-agent tool allowlists, scope-restricted tokens |
-| Redaction | PII masked in logs via `mask_contact_target()` and custom patterns |
-| Fail-Closed | Missing/invalid/expired tokens = HTTP 401 |
-| Revocation | Instant token revocation via admin endpoint |
-| Audit | All actions traceable via `token_id` and structured error codes |
-
-### Agent Permissions Matrix
-
-| Capability | Invoice Monitor | Notification Sender |
-|-----------|----------------|-------------------|
-| `invoices:read` | Yes | No |
-| `reminders:read` | Yes | Yes |
-| `reminders:summary` | Yes | No |
-| `reminders:run` | No | Yes |
-| `send_email` | No | Yes |
-| `send_sms` | No | Yes |
-| `shell` / `exec` | No | No |
-| `browser` | No | No |
-| `file_write` | No | No |
-
-### Token Rotation
-
-Rotate broker tokens regularly using the provided script:
+To revoke old token on rotation:
 
 ```bash
-# Rotate with revocation of old token
-OLD_TOKEN_ID="previous-token-id" ./scripts/rotate-broker-token.sh invoice-monitor "invoices:read,reminders:read,reminders:summary"
+OLD_TOKEN_ID="<old-token-id>" ./scripts/rotate-broker-token.sh creator-conversation "conversations:read,conversations:reply"
 ```
 
 ## Verification Checklist
 
-Before deploying to production, verify:
+Before production use:
+- [ ] `BROKER_TOKEN_SECRET` is not a placeholder.
+- [ ] `ADMIN_PASSWORD` is not a placeholder.
+- [ ] `OPENCLAW_API_KEY` is set.
+- [ ] Gateway is localhost-bound only.
+- [ ] Dangerous tools denied in all agent configs.
+- [ ] `~/.openclaw` permissions are restricted (`700`).
+- [ ] Broker token scopes match least privilege per agent.
+- [ ] `./scripts/verify-setup.sh` passes cleanly.
 
-- [ ] `BROKER_TOKEN_SECRET` is not using the default `dev-broker-secret`
-- [ ] `ADMIN_PASSWORD` is not using a placeholder value
-- [ ] `OPENCLAW_API_KEY` is set
-- [ ] Gateway is bound to `127.0.0.1` only (not `0.0.0.0`)
-- [ ] Docker containers have `no-new-privileges` and `read_only: true`
-- [ ] Agent configs deny `shell`, `exec`, `browser`, `file_write`
-- [ ] `~/.openclaw` directory has permissions `700`
-- [ ] All broker tokens have appropriate scope restrictions
-- [ ] `./scripts/verify-setup.sh` passes with zero failures
+## Operational Notes
+
+- If backend conversation policy blocks an action, OpenClaw should not retry with bypass behavior.
+- Keep conversation autonomy feature flags controlled in backend env:
+  - `CONVERSATION_ENABLED`
+  - `CONVERSATION_AUTOREPLY_ENABLED`
+  - `CONVERSATION_PROVIDER_TWILIO_ENABLED`
+  - `CONVERSATION_PROVIDER_SENDGRID_ENABLED`
+  - `CONVERSATION_PROVIDER_BLUEBUBBLES_ENABLED`
+- Enforce webhook signatures in production:
+  - `CONVERSATION_WEBHOOK_SIGNATURE_MODE=enforce`
+  - `PAYMENT_WEBHOOK_SIGNATURE_MODE=enforce`

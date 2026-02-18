@@ -28,6 +28,6 @@
     "tokenRotationReminder": true
   },
   "agents": {
-    "configDir": "./agents"
+    "configDir": "/app/config/agents"
   }
 }
