@@ -1,291 +1,301 @@
 # EROS-Invoicing-Web
 
-Standalone scaffold containing:
-- `backend/`: FastAPI API for invoicing preview/confirm/run lifecycle plus invoice reminder automation
-- `frontend/`: Next.js app with branded invoicing command UI and reminder operations panel
+EROS Invoicing Web is a FastAPI + Next.js system for:
+- invoice lifecycle operations,
+- creator passkey auth and portal access,
+- payment state and reconciliation,
+- durable reminder evaluation/send workflows,
+- guarded two-way creator conversations.
+
+## Source Of Truth
+
+This file is the canonical runtime and operator reference.
+
+Supporting docs:
+- OpenClaw runtime and agent hardening: `openclaw/README.md`
+- Cj&Jack repo access and governance: `docs/cj-jack-repo-access.md`
+- Frontend visual QA checklist: `frontend/docs/visual-qa-checklist.md`
+
+Last verified against code: February 18, 2026.
 
 ## Architecture
 
-### Backend (`backend/`)
-- Source: `backend/src/invoicing_web`
-- Entry point: `invoicing_web.main:app`
-- API router: `invoicing_web.api`
-- Deterministic in-memory store: `invoicing_web.store`
-- Auth state store: in-memory by default; Postgres-backed passkeys/rate limits available via `AUTH_STORE_BACKEND=postgres`
-- Models: `invoicing_web.models`
-- Contract compatibility: accepts legacy preview payload shape used by `EROS_TUI_CRM_BUNDLE` bridge
+### Backend
+- Code: `backend/src/invoicing_web`
+- App entrypoint: `invoicing_web.main:app`
+- Router: `invoicing_web.api`
+- Core stores:
+  - `invoicing_web.store` (invoice/payment/reminder domain state)
+  - `invoicing_web.reminder_runs` (durable reminder run/attempt/outbox/idempotency)
+  - `invoicing_web.conversations` (conversation thread/message/event/dedup)
 
-Endpoints:
-- `POST /api/v1/invoicing/preview`
-- `POST /api/v1/invoicing/confirm/{task_id}`
-- `POST /api/v1/invoicing/run/once`
-- `GET /api/v1/invoicing/tasks`
-- `GET /api/v1/invoicing/tasks/{task_id}`
-- `GET /api/v1/invoicing/artifacts/{task_id}`
-- `POST /api/v1/invoicing/invoices/upsert`
-- `POST /api/v1/invoicing/invoices/dispatch`
-- `POST /api/v1/invoicing/invoices/dispatch/{dispatch_id}/ack`
-- `POST /api/v1/invoicing/payments/events`
-- `POST /api/v1/invoicing/payments/checkout-session`
-- `POST /api/v1/invoicing/payments/ach/link-token`
-- `POST /api/v1/invoicing/payments/ach/exchange`
-- `POST /api/v1/invoicing/payments/webhooks/{provider}`
-- `GET /api/v1/invoicing/payments/invoices/{invoice_id}/status`
-- `GET /api/v1/invoicing/admin/reconciliation/cases`
-- `POST /api/v1/invoicing/admin/reconciliation/cases/{case_id}/resolve`
-- `GET /api/v1/invoicing/admin/payouts`
-- `GET /api/v1/invoicing/admin/payouts/{payout_id}`
-- `POST /api/v1/invoicing/auth/lookup`
-- `POST /api/v1/invoicing/auth/confirm`
-- `GET /api/v1/invoicing/me/invoices`
-- `GET /api/v1/invoicing/me/invoices/{invoice_id}/pdf`
-- `GET /api/v1/invoicing/reminders/summary`
-- `POST /api/v1/invoicing/reminders/run/once`
-- `GET /api/v1/invoicing/reminders/escalations`
+### Frontend
+- Code: `frontend/`
+- Admin dashboard: `frontend/app/admin/page.tsx`
+- Creator login: `frontend/app/login/page.tsx`
+- Creator portal: `frontend/app/portal/page.tsx`
+- API helper: `frontend/lib/api.ts`
 
-Preview payload example:
+### OpenClaw
+- Config and agent definitions: `openclaw/`
+- Uses broker-token scoped `/agent/*` backend endpoints
 
-```json
-{
-  "agent_slug": "payout-reconciliation",
-  "window_start": "2026-02-01",
-  "window_end": "2026-02-28",
-  "source_refs": ["/tmp/exports/invoices.csv"],
-  "mode": "plan_only",
-  "idempotency_key": "invoicing-feb-2026",
-  "principal_employee_id": "employee-123",
-  "metadata": {"legacy_command": "preview-invoicing"}
-}
-```
+## API Catalog
 
-### Frontend (`frontend/`)
-- Next.js app-router experience with EROS branded design system
-- `app/page.tsx`: creator-facing landing page
-- `app/admin/page.tsx`: unified admin dashboard (ops + reference docs)
-- `app/portal/page.tsx`: creator invoice dashboard
-- `app/portal/invoices/[invoiceId]/page.tsx`: creator invoice PDF viewer
-- `lib/api.ts`: backend API helper for task, reminder, and creator session endpoints
+All paths are under `/api/v1/invoicing`.
 
-## Reminder Automation (Internal Notifier)
+### Core Invoicing
+- `POST /preview`
+- `POST /confirm/{task_id}`
+- `POST /run/once`
+- `GET /tasks`
+- `GET /tasks/{task_id}`
+- `GET /artifacts/{task_id}`
+- `POST /invoices/upsert`
+- `POST /invoices/dispatch`
+- `POST /invoices/dispatch/{dispatch_id}/ack`
 
-The reminder pipeline is deterministic and run-once driven:
-- Invoice state and reminder counters are stored in-memory.
-- Passkey auth state and login-rate-limit counters can be persisted in Postgres.
-- Invoices are reminder-eligible only after dispatch (`/invoices/dispatch`).
-- Payment updates arrive via API events (`/payments/events`).
-- Reminder runs execute through `/reminders/run/once`.
-- Notifier adapter is pluggable and defaults to dry-run-safe behavior.
+### Payments
+- `POST /payments/events`
+- `POST /payments/checkout-session`
+- `POST /payments/ach/link-token` (admin auth required)
+- `POST /payments/ach/exchange` (admin auth required)
+- `POST /payments/webhooks/{provider}`
+- `GET /payments/invoices/{invoice_id}/status`
+- `GET /admin/reconciliation/cases` (admin auth required)
+- `POST /admin/reconciliation/cases/{case_id}/resolve` (admin auth required)
+- `GET /admin/payouts` (admin auth required)
+- `GET /admin/payouts/{payout_id}` (admin auth required)
 
-Reminder policy defaults:
-- First reminder at due date.
-- Re-send cooldown: 48 hours.
-- Stops when paid or opted out.
-- Escalates to manual queue after 6 reminders.
-- Multi-channel dispatch/reminders support `email` and `sms`.
+### Reminder Operations
+- `GET /reminders/summary` (admin auth required)
+- `POST /reminders/run/once` (admin auth required)
+- `POST /reminders/evaluate` (admin auth required)
+- `POST /reminders/runs/{run_id}/send` (admin auth required)
+- `GET /reminders/escalations` (admin auth required)
 
-### Invoice upsert payload example
+### Conversation Webhooks (Provider Ingress)
+- `POST /webhooks/twilio/inbound`
+- `POST /webhooks/twilio/status`
+- `POST /webhooks/bluebubbles/inbound`
+- `POST /webhooks/bluebubbles/status`
+- `POST /webhooks/sendgrid/inbound`
+- `POST /webhooks/sendgrid/status`
 
-```json
-{
-  "invoices": [
-    {
-      "invoice_id": "inv-2026-0001",
-      "creator_id": "creator-123",
-      "creator_name": "Creator Prime",
-      "creator_timezone": "America/New_York",
-      "contact_channel": "email",
-      "contact_target": "creator@example.com",
-      "currency": "USD",
-      "amount_due": 4500.0,
-      "amount_paid": 0.0,
-      "issued_at": "2026-02-01",
-      "due_date": "2026-02-10",
-      "opt_out": false,
-      "metadata": {"source": "erp-sync"}
-    }
-  ]
-}
-```
+### Admin Conversation Operations
+- `GET /admin/conversations` (admin auth required)
+- `GET /admin/conversations/{thread_id}` (admin auth required)
+- `POST /admin/conversations/{thread_id}/handoff` (admin auth required)
+- `POST /admin/conversations/{thread_id}/reply` (admin auth required)
 
-### Payment event payload example
+### Admin Auth + Creator Directory
+- `POST /admin/login`
+- `GET /admin/session` (admin auth required)
+- `GET /admin/runtime/security` (admin auth required)
+- `GET /admin/creators` (admin auth required)
 
-```json
-{
-  "event_id": "payevt-2026-02-15-001",
-  "invoice_id": "inv-2026-0001",
-  "amount": 1200.0,
-  "paid_at": "2026-02-15T14:30:00Z",
-  "source": "bank-transfer",
-  "metadata": {"batch": "2026-02-15"}
-}
-```
+### Passkey Management (Admin)
+- `POST /passkeys/generate` (admin auth required)
+- `GET /passkeys` (admin auth required)
+- `POST /passkeys/revoke` (admin auth required)
 
-### Invoice dispatch payload example
+### Creator Auth + Session APIs
+- `POST /auth/lookup`
+- `POST /auth/confirm`
+- `GET /me/invoices` (creator session required)
+- `GET /me/invoices/{invoice_id}/pdf` (creator session required)
 
-```json
-{
-  "invoice_id": "inv-2026-0001",
-  "dispatched_at": "2026-02-10T00:00:00Z",
-  "channels": ["email", "sms"],
-  "recipient_email": "creator@example.com",
-  "recipient_phone": "+15555550123",
-  "idempotency_key": "dispatch-2026-0001"
-}
-```
+### Agent APIs (Broker Token)
+- `GET /agent/reminders/summary`
+- `GET /agent/invoices`
+- `POST /agent/reminders/run/once`
+- `GET /agent/reminders/escalations`
+- `GET /agent/conversations/{thread_id}/context`
+- `POST /agent/conversations/{thread_id}/suggest-reply`
+- `POST /agent/conversations/{thread_id}/execute-action`
+- `POST /agent/tokens` (admin auth required)
+- `POST /agent/tokens/revoke` (admin auth required)
 
-### Passkey auth confirm payload example
+## Runtime Modes
 
-```json
-{
-  "passkey": "agency-issued-passkey"
-}
-```
+### Reminders
+- `dry_run=true`:
+  - evaluates eligibility,
+  - records run artifacts,
+  - does not send messages.
+- Live send options:
+  - single-step: `POST /reminders/run/once` with `dry_run=false`,
+  - two-step: `POST /reminders/evaluate`, then `POST /reminders/runs/{run_id}/send`.
 
-### Reminder run payload example
+### Conversations
+- `CONVERSATION_ENABLED=true` enables webhook ingestion and thread APIs.
+- `CONVERSATION_AUTOREPLY_ENABLED=true` allows policy-approved automated replies.
+- Provider ingress is independently controlled by:
+  - `CONVERSATION_PROVIDER_TWILIO_ENABLED`
+  - `CONVERSATION_PROVIDER_SENDGRID_ENABLED`
+  - `CONVERSATION_PROVIDER_BLUEBUBBLES_ENABLED`
+- If auto-reply is disabled, inbound messages are still persisted and visible to admins.
+- Providers are explicit opt-in for local/dev. Keep provider flags `false` unless that ingress is in use.
 
-```json
-{
-  "dry_run": true,
-  "limit": 50
-}
-```
+### Signature Validation Modes
+- Payment webhooks: `PAYMENT_WEBHOOK_SIGNATURE_MODE=off|log_only|enforce`
+- Conversation webhooks: `CONVERSATION_WEBHOOK_SIGNATURE_MODE=off|log_only|enforce`
+- In conversation `enforce` mode, provider secrets are required only for providers explicitly enabled.
 
-## CSV Seed Validation Flow
+## Security Guardrails
 
-Use the seed tooling to transform CB sales + creator stats CSV reports into deterministic invoice test payloads and run the dispatch, creator-notification, payment, and reminder pipeline through existing APIs.
+### Reminder Guardrails
+- Live reminder requests require idempotency key when `REMINDER_LIVE_REQUIRES_IDEMPOTENCY=true`.
+- Reminder trigger requests are rate-limited.
+- Eligibility enforces due-date, cooldown, opt-out, paid-state, and escalation threshold checks.
+- Durable outbox tracks retries and dead-letter outcomes.
+- Reminder summary last-run fields are sourced from durable reminder-run records.
 
-Primary script:
-```bash
-python3 scripts/seed_from_cb_reports.py \
-  --sales-csv "/absolute/path/to/CB Daily Sales Report 2026 - February 2026.csv" \
-  --creator-csv "/absolute/path/to/Creator statistics report 2026:01:17 to 2026:02:15.csv" \
-  --creator-override "grace bennett paid=grace bennett" \
-  --run-live \
-  --inject-scenario-pack \
-  --simulate-payment-event
-```
+### Conversation Guardrails
+- Inbound webhook dedup is keyed by provider message identity.
+- Policy layer can force `human_handoff` for risky content or low confidence.
+- Auto-reply count is capped per thread.
+- Agent conversation actions are scope-gated and policy-gated.
+- Provider ingress can be toggled independently (`twilio`, `sendgrid`, `bluebubbles`).
 
-Convenience wrapper (defaults to the same two source paths):
-```bash
-./scripts/test_cb_seed_flow.sh
-```
+### Auth + Token Guardrails
+- Admin auth uses signed admin session tokens.
+- Creator portal auth uses passkeys + signed creator session tokens.
+- Broker tokens are scoped, short-lived, and revocable.
 
-Artifacts are written to `/tmp/cb-seed-artifacts` (or provided output dir), including:
-- `profile.json`
-- `normalized_sessions.json`
-- `creator_stats_rows.json`
-- `invoice_upsert_payload.json`
-- `reconciliation.json`
-- `api_results.json`
+## Environment Variables
 
-Notes:
-- Extraction rows are excluded from invoice derivation.
-- Reconciliation is advisory by default (`status=variance` can occur due to source/report scope differences).
-- Enable strict reconciliation failure with `--strict-reconciliation`.
+Use `.env.example` as baseline.
 
-## Run Commands
+### App Core
+- `INVOICING_APP_NAME`
+- `INVOICING_API_PREFIX`
 
-### Bootstrap (backend + frontend)
+### Legacy OpenClaw Compatibility (fallback)
+- `OPENCLAW_ENABLED`
+- `OPENCLAW_DRY_RUN_DEFAULT`
+- `OPENCLAW_CHANNEL`
+- `OPENCLAW_API_BASE_URL`
+- `OPENCLAW_API_KEY`
+- `OPENCLAW_SENDER_TYPE`
+- `OPENCLAW_TIMEOUT_SECONDS`
+
+### Preferred Notifier Transport
+- `NOTIFIER_ENABLED`
+- `NOTIFIER_DRY_RUN_DEFAULT`
+- `NOTIFIER_CHANNEL`
+- `NOTIFIER_API_BASE_URL`
+- `NOTIFIER_API_KEY`
+- `NOTIFIER_SENDER_TYPE`
+- `NOTIFIER_TIMEOUT_SECONDS`
+
+### Reminder Controls
+- `REMINDER_LIVE_REQUIRES_IDEMPOTENCY`
+- `REMINDER_RUN_LIMIT_MAX`
+- `REMINDER_ALLOW_LIVE_NOW_OVERRIDE`
+- `REMINDER_TRIGGER_RATE_LIMIT_MAX`
+- `REMINDER_TRIGGER_RATE_LIMIT_WINDOW_SECONDS`
+- `REMINDER_STORE_BACKEND` (`inmemory` or `postgres`)
+
+### Conversation Controls
+- `CONVERSATION_ENABLED`
+- `CONVERSATION_AUTOREPLY_ENABLED`
+- `CONVERSATION_STORE_BACKEND` (`inmemory` or `postgres`)
+- `CONVERSATION_CONFIDENCE_THRESHOLD`
+- `CONVERSATION_MAX_AUTO_REPLIES`
+- `CONVERSATION_WEBHOOK_SIGNATURE_MODE` (`off`, `log_only`, `enforce`)
+- `CONVERSATION_WEBHOOK_MAX_AGE_SECONDS`
+- `CONVERSATION_PROVIDER_TWILIO_ENABLED`
+- `CONVERSATION_PROVIDER_SENDGRID_ENABLED`
+- `CONVERSATION_PROVIDER_BLUEBUBBLES_ENABLED`
+- `TWILIO_AUTH_TOKEN`
+- `SENDGRID_INBOUND_SECRET`
+- `BLUEBUBBLES_WEBHOOK_SECRET`
+- In `CONVERSATION_WEBHOOK_SIGNATURE_MODE=enforce`, each secret is required only when its provider flag is enabled.
+
+### Payment Controls
+- `PAYMENTS_PROVIDER`
+- `PAYMENTS_PROVIDER_NAME`
+- `AGENCY_SETTLEMENT_ACCOUNT_LABEL`
+- `PAYMENT_WEBHOOK_SIGNATURE_MODE`
+- `PAYMENT_WEBHOOK_SIGNATURE_MAX_AGE_SECONDS`
+- `PAYMENT_WEBHOOK_SECRET_DEFAULT`
+- `PAYMENT_WEBHOOK_SECRET_STRIPE`
+- `PAYMENT_WEBHOOK_SECRET_PLAID`
+
+### Auth + Sessions
+- `AUTH_STORE_BACKEND` (`inmemory` or `postgres`)
+- `DATABASE_URL`
+- `ADMIN_PASSWORD`
+- `ADMIN_SESSION_SECRET`
+- `CREATOR_SESSION_SECRET`
+- `CREATOR_SESSION_TTL_MINUTES`
+- `COOKIE_SECURE`
+- `BROKER_TOKEN_SECRET`
+- `BROKER_TOKEN_DEFAULT_TTL_MINUTES`
+- `BROKER_TOKEN_MAX_TTL_MINUTES`
+- `RUNTIME_SECRET_GUARD_MODE` (`off`, `warn`, `enforce`)
+
+### Legacy-Named Secret (still required)
+- `CREATOR_MAGIC_LINK_SECRET`
+  - Variable name is legacy, but it remains part of runtime secret guard checks.
+
+### Proxy / Portal
+- `CREATOR_PORTAL_BASE_URL`
+- `TRUST_PROXY_HEADERS`
+- `TRUSTED_PROXY_IPS`
+
+### Frontend Server Env
+- `INVOICING_API_BASE_URL`
+
+## Developer Commands
+
+### Bootstrap
 ```bash
 ./scripts/bootstrap_dev.sh
 ```
-
-Notes:
-- Uses `python3` explicitly for backend tooling.
-- Uses `npm ci` when `frontend/package-lock.json` is present; otherwise falls back to `npm install`.
 
 ### Backend
 ```bash
 cd backend
 python3 -m pip install -e ".[dev]"
-# Run DB migrations when AUTH_STORE_BACKEND=postgres
-alembic -c alembic.ini upgrade head
 python3 -m uvicorn invoicing_web.main:app --app-dir src --reload
 ```
 
-### Backend tests
+If startup fails with `runtime secret guard blocked startup`, either:
+- disable unused conversation providers (`CONVERSATION_PROVIDER_*_ENABLED=false`), or
+- configure the corresponding provider secret while enforce mode is enabled.
+
+### Migrations
 ```bash
 cd backend
-python3 -m pip install -e ".[dev]"
+alembic -c alembic.ini upgrade head
+```
+
+### Tests
+```bash
+cd backend
 python3 -m pytest -q
-```
 
-### Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Safe workflow notes:
-- `npm run dev` uses a lifecycle guard and records active process state in `frontend/.next-mode-state`.
-- Stop `npm run dev` before `npm run build`, `npm run start`, or `./scripts/check_baseline.sh`.
-- Use `npm run status` to inspect guard state.
-- Use `npm run clean` to clear `frontend/.next` and guard state files when recovering from stale artifacts.
-
-Frontend production commands:
-```bash
-cd frontend
+cd ../frontend
+npm run lint
 npm run build
-npm run start
 ```
 
-Frontend auth flow E2E tests (Playwright):
-```bash
-cd frontend
-npx playwright install chromium
-npm run test:e2e
-```
-
-Notes:
-- Tests live in `frontend/tests-e2e/` and cover creator login + admin gate auth flows.
-- Set `E2E_BASE_URL` to target an already-running app instead of auto-starting one.
-
-### Baseline checks (exact matrix)
+### Baseline Matrix
 ```bash
 ./scripts/check_baseline.sh
 ```
-Runs:
-- `cd backend && python3 -m pytest -q`
-- `cd frontend && npm run lint`
-- `cd frontend && npm run build`
 
-If baseline reports an active guarded Next process, stop `npm run dev` and rerun.
+## Seed Workflow
 
-Recommended runtime recovery for chunk/ENOENT issues:
-```bash
-cd frontend
-npm run clean
-npm run build
-```
+CSV-to-invoice seed helpers are in `scripts/`:
+- `scripts/seed_from_cb_reports.py`
+- `scripts/test_cb_seed_flow.sh`
+- `scripts/seed_grace_bennett.py`
 
-### TUI bridge integration
+Artifacts default to `/tmp/cb-seed-artifacts`.
 
-Set these in `EROS_TUI_CRM_BUNDLE/.env` to route legacy invoicing CLI/tools into this backend:
+## Governance
 
-```bash
-INVOICING_WEB_BASE_URL=http://localhost:8000
-INVOICING_WEB_LEGACY_SHIM_ENABLED=true
-```
-
-## Environment Variables
-
-Set these in the service environment (see `.env.example`):
-- `INVOICING_APP_NAME`
-- `INVOICING_API_PREFIX`
-- `NOTIFIER_ENABLED`
-- `NOTIFIER_DRY_RUN_DEFAULT`
-- `NOTIFIER_CHANNEL` (comma-separated, e.g. `email,sms`)
-- `NOTIFIER_API_BASE_URL`
-- `NOTIFIER_API_KEY`
-- `PAYMENTS_PROVIDER`
-- `PAYMENTS_PROVIDER_NAME`
-- `AGENCY_SETTLEMENT_ACCOUNT_LABEL`
-- `AUTH_STORE_BACKEND` (`inmemory` or `postgres`)
-- `DATABASE_URL` (required when `AUTH_STORE_BACKEND=postgres`)
-- `OPENCLAW_*` legacy vars are still accepted as fallback during migration
-- `CREATOR_MAGIC_LINK_SECRET`
-- `CREATOR_PORTAL_BASE_URL`
-- `TRUST_PROXY_HEADERS`
-- `TRUSTED_PROXY_IPS` (comma-separated proxy source IP allowlist for honoring `X-Forwarded-For`)
-- `INVOICING_API_BASE_URL` (frontend server env)
+For Cj&Jack onboarding and branch governance, see `docs/cj-jack-repo-access.md`.
