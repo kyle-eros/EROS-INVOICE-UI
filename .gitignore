@@ -21,10 +21,13 @@ backend/htmlcov/
 # Node frontend
 frontend/node_modules/
 frontend/.next/
+frontend/.next-last-mode
+frontend/.next-mode-state
 frontend/out/
 frontend/.turbo/
 frontend/.npm/
 frontend/.pnpm-store/
+frontend/tsconfig.tsbuildinfo
 frontend/playwright-report/
 frontend/test-results/
 
