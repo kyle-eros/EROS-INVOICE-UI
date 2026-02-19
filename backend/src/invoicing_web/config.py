@@ -74,6 +74,7 @@ class Settings:
     reminder_trigger_rate_limit_max: int = 10
     reminder_trigger_rate_limit_window_seconds: int = 60
     reminder_store_backend: str = "inmemory"
+    invoice_store_backend: str = "inmemory"
     # Payment routing settings.
     payments_provider: str = "stub"
     payments_provider_name: str = "eros_stub"
@@ -157,6 +158,7 @@ def get_settings() -> Settings:
         reminder_trigger_rate_limit_max=int(os.getenv("REMINDER_TRIGGER_RATE_LIMIT_MAX", "10")),
         reminder_trigger_rate_limit_window_seconds=int(os.getenv("REMINDER_TRIGGER_RATE_LIMIT_WINDOW_SECONDS", "60")),
         reminder_store_backend=os.getenv("REMINDER_STORE_BACKEND", "inmemory"),
+        invoice_store_backend=os.getenv("INVOICE_STORE_BACKEND", "inmemory"),
         payments_provider=os.getenv("PAYMENTS_PROVIDER", "stub"),
         payments_provider_name=os.getenv("PAYMENTS_PROVIDER_NAME", "eros_stub"),
         agency_settlement_account_label=os.getenv("AGENCY_SETTLEMENT_ACCOUNT_LABEL", "agency-main"),

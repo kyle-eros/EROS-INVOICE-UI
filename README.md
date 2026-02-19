@@ -15,6 +15,7 @@ Supporting docs:
 - OpenClaw runtime and agent hardening: `openclaw/README.md`
 - Cj&Jack repo access and governance: `docs/cj-jack-repo-access.md`
 - Frontend visual QA checklist: `frontend/docs/visual-qa-checklist.md`
+- Demo readiness checklist: `docs/demo-readiness-checklist.md`
 
 Last verified against code: February 18, 2026.
 
@@ -93,6 +94,10 @@ All paths are under `/api/v1/invoicing`.
 - `GET /admin/session` (admin auth required)
 - `GET /admin/runtime/security` (admin auth required)
 - `GET /admin/creators` (admin auth required)
+  - Optional query: `focus_year=<YYYY>` (defaults to current UTC year).
+  - Includes creator-level balance summary fields: `unpaid_invoice_count`, `total_balance_owed_usd`,
+    `jan_full_invoice_usd`, `feb_current_owed_usd`, and `has_non_usd_open_invoices`.
+  - USD totals include only open USD balances; non-USD open invoices are flagged but excluded from the USD sum.
 
 ### Passkey Management (Admin)
 - `POST /passkeys/generate` (admin auth required)
@@ -196,6 +201,7 @@ Use `.env.example` as baseline.
 - `REMINDER_TRIGGER_RATE_LIMIT_MAX`
 - `REMINDER_TRIGGER_RATE_LIMIT_WINDOW_SECONDS`
 - `REMINDER_STORE_BACKEND` (`inmemory` or `postgres`)
+- `INVOICE_STORE_BACKEND` (`inmemory` or `postgres`)
 
 ### Conversation Controls
 - `CONVERSATION_ENABLED`
@@ -255,7 +261,22 @@ Use `.env.example` as baseline.
 ./scripts/bootstrap_dev.sh
 ```
 
-### Backend
+### Backend (Recommended)
+```bash
+./scripts/start_backend_dev.sh
+```
+
+This script:
+- loads `.env`,
+- runs Alembic migrations when any `*_STORE_BACKEND=postgres`,
+- starts uvicorn with reload.
+
+### Frontend (Recommended)
+```bash
+./scripts/start_frontend_dev.sh
+```
+
+### Backend (Manual)
 ```bash
 cd backend
 python3 -m pip install -e ".[dev]"
@@ -265,6 +286,11 @@ python3 -m uvicorn invoicing_web.main:app --app-dir src --reload
 If startup fails with `runtime secret guard blocked startup`, either:
 - disable unused conversation providers (`CONVERSATION_PROVIDER_*_ENABLED=false`), or
 - configure the corresponding provider secret while enforce mode is enabled.
+
+If file-watch reload fails (for example `Operation not permitted` in restricted environments), run:
+```bash
+BACKEND_DISABLE_RELOAD=true ./scripts/start_backend_dev.sh
+```
 
 ### Migrations
 ```bash
@@ -287,6 +313,29 @@ npm run build
 ./scripts/check_baseline.sh
 ```
 
+### Demo Bring-Up
+```bash
+# terminal A
+./scripts/start_backend_dev.sh
+
+# terminal B
+./scripts/start_frontend_dev.sh
+
+# terminal C
+./scripts/reseed_demo_data.sh
+./scripts/demo_smoke.sh
+```
+
+Demo smoke report defaults to:
+- `/tmp/eros-demo-smoke-report.json`
+
+Reseed validation report defaults to:
+- `/tmp/eros-90d-seed-artifacts/demo_reseed_summary.json`
+
+Important:
+- when `INVOICE_STORE_BACKEND=inmemory`, invoice/task domain state is reset on restart,
+- when `INVOICE_STORE_BACKEND=postgres` (including SQLite via `DATABASE_URL=sqlite+pysqlite:///...`), invoice/task state persists across restarts.
+
 ## Seed Workflow
 
 CSV-to-invoice seed helpers are in `scripts/`:
@@ -294,6 +343,7 @@ CSV-to-invoice seed helpers are in `scripts/`:
 - `scripts/test_cb_seed_flow.sh`
 - `scripts/seed_grace_bennett.py`
 - `scripts/seed_from_90d_earnings.py`
+- `scripts/reseed_demo_data.sh` (demo reseed wrapper + validation)
 
 By default, local seed scripts read source CSVs from the repo-local `data/` folder:
 - `data/CB Daily Sales Report 2026 - February 2026.csv`

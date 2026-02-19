@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from .models import (
+    CreatorPaymentSubmissionResponse,
     CreatorDispatchAcknowledgeResponse,
     CreatorInvoicesResponse,
     InvoicePdfContext,
@@ -34,6 +35,12 @@ class InvoiceRepository(Protocol):
     def get_creator_invoices(self, creator_id: str) -> CreatorInvoicesResponse: ...
 
     def get_creator_invoice_pdf(self, creator_id: str, invoice_id: str) -> InvoicePdfContext: ...
+
+    def submit_creator_payment_submission(
+        self,
+        creator_id: str,
+        invoice_id: str,
+    ) -> CreatorPaymentSubmissionResponse: ...
 
 
 class ReminderRepository(Protocol):

@@ -96,6 +96,10 @@ def _client() -> TestClient:
     os.environ["PAYMENT_WEBHOOK_SIGNATURE_MODE"] = "off"
     from invoicing_web.config import get_settings
     api_module._settings = get_settings()
+    api_module.task_store = api_module.create_task_store(
+        backend=api_module._settings.invoice_store_backend,
+        database_url=api_module._settings.database_url,
+    )
     api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
     api_module.reminder_run_repo = api_module.create_reminder_run_repository(
         backend=api_module._settings.reminder_store_backend,
@@ -791,6 +795,99 @@ def test_reminder_idempotency_persists_with_database_backend() -> None:
             os.environ.pop("REMINDER_STORE_BACKEND", None)
         else:
             os.environ["REMINDER_STORE_BACKEND"] = original_backend
+        if original_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = original_database_url
+
+
+def test_invoice_state_persists_with_database_backend() -> None:
+    from invoicing_web.task_store_backends import SQLALCHEMY_AVAILABLE as INVOICE_SQLALCHEMY_AVAILABLE
+
+    if not INVOICE_SQLALCHEMY_AVAILABLE:
+        return
+
+    original_invoice_backend = os.environ.get("INVOICE_STORE_BACKEND")
+    original_database_url = os.environ.get("DATABASE_URL")
+    db_name = f"/tmp/invoicing_invoice_{uuid4().hex}.db"
+    try:
+        os.environ["INVOICE_STORE_BACKEND"] = "postgres"
+        os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{db_name}"
+        client = _client()
+
+        upsert_resp = client.post(
+            "/api/v1/invoicing/invoices/upsert",
+            json={
+                "invoices": [
+                    _invoice_payload(
+                        invoice_id="inv-persist-jan-001",
+                        due_date="2026-01-20",
+                        issued_at="2026-01-05",
+                    ),
+                    _invoice_payload(
+                        invoice_id="inv-persist-feb-001",
+                        due_date="2026-02-20",
+                        issued_at="2026-02-05",
+                    ),
+                ]
+            },
+        )
+        assert upsert_resp.status_code == 200
+
+        dispatch_resp = client.post(
+            "/api/v1/invoicing/invoices/dispatch",
+            json=_dispatch_payload(
+                invoice_id="inv-persist-feb-001",
+                dispatch_time="2026-02-06T00:00:00Z",
+                idempotency_key="dispatch-persist-feb-001",
+            ),
+        )
+        assert dispatch_resp.status_code == 200
+
+        from invoicing_web.config import get_settings
+
+        api_module._settings = get_settings()
+        api_module.task_store = api_module.create_task_store(
+            backend=api_module._settings.invoice_store_backend,
+            database_url=api_module._settings.database_url,
+        )
+        api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
+        api_module.reminder_run_repo = api_module.create_reminder_run_repository(
+            backend=api_module._settings.reminder_store_backend,
+            database_url=api_module._settings.database_url,
+        )
+        api_module.reminder_workflow = api_module.ReminderWorkflowService(
+            repository=api_module.reminder_run_repo,
+            store=api_module.task_store,
+        )
+        api_module.conversation_repo = api_module.create_conversation_repository(
+            backend=api_module._settings.conversation_store_backend,
+            database_url=api_module._settings.database_url,
+        )
+        api_module.conversation_service = api_module.ConversationService(
+            repository=api_module.conversation_repo,
+            store=api_module.task_store,
+            settings=api_module._settings,
+        )
+        restarted_client = TestClient(create_app())
+
+        admin_headers = _admin_headers(restarted_client)
+        creators_resp = restarted_client.get(
+            "/api/v1/invoicing/admin/creators?focus_year=2026",
+            headers=admin_headers,
+        )
+        assert creators_resp.status_code == 200
+        items = creators_resp.json()["creators"]
+        assert len(items) == 1
+        assert items[0]["invoice_count"] == 2
+        assert items[0]["dispatched_invoice_count"] == 1
+        assert items[0]["jan_full_invoice_usd"] == 250.0
+        assert items[0]["feb_current_owed_usd"] == 250.0
+    finally:
+        if original_invoice_backend is None:
+            os.environ.pop("INVOICE_STORE_BACKEND", None)
+        else:
+            os.environ["INVOICE_STORE_BACKEND"] = original_invoice_backend
         if original_database_url is None:
             os.environ.pop("DATABASE_URL", None)
         else:

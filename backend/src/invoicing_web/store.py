@@ -19,6 +19,7 @@ from .models import (
     CreatorDispatchAcknowledgeResponse,
     CreatorInvoiceItem,
     CreatorInvoicesResponse,
+    CreatorPaymentSubmissionResponse,
     EscalationItem,
     InvoiceDetailPayload,
     InvoiceDispatchRequest,
@@ -130,6 +131,8 @@ class _InvoiceRecord:
     last_reminder_at: datetime | None
     updated_at: datetime
     detail: InvoiceDetailPayload | None
+    creator_payment_submitted_at: datetime | None = None
+    creator_payment_submission_count: int = 0
 
 
 @dataclass
@@ -228,6 +231,20 @@ class _PayoutRecord:
     status: str
     created_at: datetime
     settled_at: datetime | None = None
+
+
+@dataclass
+class _CreatorBalanceOverview:
+    creator_id: str
+    creator_name: str
+    invoice_count: int
+    dispatched_invoice_count: int
+    unpaid_invoice_count: int
+    submitted_payment_invoice_count: int
+    total_balance_owed_usd: float
+    jan_full_invoice_usd: float
+    feb_current_owed_usd: float
+    has_non_usd_open_invoices: bool
 
 
 class InMemoryTaskStore:
@@ -496,9 +513,12 @@ class InMemoryTaskStore:
                         last_reminder_at=None,
                         updated_at=now,
                         detail=item.detail.model_copy(deep=True) if item.detail is not None else None,
+                        creator_payment_submitted_at=None,
+                        creator_payment_submission_count=0,
                     )
                     self._invoices[item.invoice_id] = record
                 else:
+                    self._ensure_invoice_extensions(record)
                     record.creator_id = item.creator_id
                     record.creator_name = item.creator_name
                     record.creator_timezone = item.creator_timezone
@@ -525,9 +545,79 @@ class InMemoryTaskStore:
             now = datetime.now(timezone.utc)
             records = sorted(self._invoices.values(), key=lambda value: (value.due_date, value.invoice_id))
             for record in records:
+                self._ensure_invoice_extensions(record)
                 self._refresh_invoice_status(record, now)
                 self._refresh_invoice_notification(record)
             return [self._to_invoice_record(record) for record in records]
+
+    def list_creator_balance_overview(self, *, focus_year: int) -> list[_CreatorBalanceOverview]:
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            directory: dict[str, dict[str, int | float | bool | str]] = {}
+            for record in self._invoices.values():
+                self._ensure_invoice_extensions(record)
+                self._refresh_invoice_status(record, now)
+                self._refresh_invoice_notification(record)
+
+                bucket = directory.get(record.creator_id)
+                if bucket is None:
+                    bucket = {
+                        "creator_name": record.creator_name,
+                        "invoice_count": 0,
+                        "dispatched_invoice_count": 0,
+                        "unpaid_invoice_count": 0,
+                        "submitted_payment_invoice_count": 0,
+                        "total_balance_owed_usd": 0.0,
+                        "jan_full_invoice_usd": 0.0,
+                        "feb_current_owed_usd": 0.0,
+                        "has_non_usd_open_invoices": False,
+                    }
+                    directory[record.creator_id] = bucket
+
+                bucket["invoice_count"] = int(bucket["invoice_count"]) + 1
+                if record.dispatch_id is not None:
+                    bucket["dispatched_invoice_count"] = int(bucket["dispatched_invoice_count"]) + 1
+
+                if record.currency == "USD" and record.issued_at.year == focus_year and record.issued_at.month == 1:
+                    jan_running_total = float(bucket["jan_full_invoice_usd"])
+                    bucket["jan_full_invoice_usd"] = jan_running_total + record.amount_due
+
+                if (
+                    record.currency == "USD"
+                    and record.issued_at.year == focus_year
+                    and record.issued_at.month == 2
+                    and record.balance_due > 0
+                ):
+                    feb_running_total = float(bucket["feb_current_owed_usd"])
+                    bucket["feb_current_owed_usd"] = feb_running_total + record.balance_due
+
+                if record.balance_due > 0:
+                    bucket["unpaid_invoice_count"] = int(bucket["unpaid_invoice_count"]) + 1
+                    if record.creator_payment_submitted_at is not None:
+                        bucket["submitted_payment_invoice_count"] = int(bucket["submitted_payment_invoice_count"]) + 1
+                    if record.currency == "USD":
+                        running_total = float(bucket["total_balance_owed_usd"])
+                        bucket["total_balance_owed_usd"] = running_total + record.balance_due
+                    else:
+                        bucket["has_non_usd_open_invoices"] = True
+
+            items = [
+                _CreatorBalanceOverview(
+                    creator_id=creator_id,
+                    creator_name=str(values["creator_name"]),
+                    invoice_count=int(values["invoice_count"]),
+                    dispatched_invoice_count=int(values["dispatched_invoice_count"]),
+                    unpaid_invoice_count=int(values["unpaid_invoice_count"]),
+                    submitted_payment_invoice_count=int(values["submitted_payment_invoice_count"]),
+                    total_balance_owed_usd=self._round_amount(float(values["total_balance_owed_usd"])),
+                    jan_full_invoice_usd=self._round_amount(float(values["jan_full_invoice_usd"])),
+                    feb_current_owed_usd=self._round_amount(float(values["feb_current_owed_usd"])),
+                    has_non_usd_open_invoices=bool(values["has_non_usd_open_invoices"]),
+                )
+                for creator_id, values in directory.items()
+            ]
+            items.sort(key=lambda item: (item.creator_name.lower(), item.creator_id))
+            return items
 
     def resolve_conversation_context(self, *, channel: ContactChannel, external_contact: str) -> tuple[str | None, str | None, str | None]:
         with self._lock:
@@ -567,6 +657,7 @@ class InMemoryTaskStore:
             record = self._invoices.get(payload.invoice_id)
             if record is None:
                 raise InvoiceNotFoundError(payload.invoice_id)
+            self._ensure_invoice_extensions(record)
 
             idem = payload.idempotency_key
             if idem and idem in self._dispatch_idempotency:
@@ -615,6 +706,7 @@ class InMemoryTaskStore:
             record = self._invoices.get(dispatch.invoice_id)
             if record is None:
                 raise InvoiceNotFoundError(dispatch.invoice_id)
+            self._ensure_invoice_extensions(record)
 
             acknowledged_at = datetime.now(timezone.utc)
             self._refresh_invoice_status(record, acknowledged_at)
@@ -646,6 +738,7 @@ class InMemoryTaskStore:
             records.sort(key=lambda value: (value.due_date, value.invoice_id))
             items: list[CreatorInvoiceItem] = []
             for record in records:
+                self._ensure_invoice_extensions(record)
                 self._refresh_invoice_status(record, now)
                 self._refresh_invoice_notification(record)
                 if record.dispatch_id is None or record.dispatched_at is None:
@@ -665,6 +758,7 @@ class InMemoryTaskStore:
                         notification_state=record.notification_state,
                         reminder_count=record.reminder_count,
                         has_pdf=record.detail is not None,
+                        creator_payment_submitted_at=record.creator_payment_submitted_at,
                         last_reminder_attempt_at=record.last_reminder_attempt_at,
                         last_reminder_at=record.last_reminder_at,
                     )
@@ -683,6 +777,7 @@ class InMemoryTaskStore:
                 or record.dispatched_at is None
             ):
                 raise InvoiceNotFoundError(invoice_id)
+            self._ensure_invoice_extensions(record)
             if record.detail is None:
                 raise InvoiceDetailNotFoundError(invoice_id)
 
@@ -701,6 +796,56 @@ class InMemoryTaskStore:
                 amount_paid=record.amount_paid,
                 balance_due=record.balance_due,
                 detail=record.detail.model_copy(deep=True),
+            )
+
+    def submit_creator_payment_submission(
+        self,
+        creator_id: str,
+        invoice_id: str,
+    ) -> CreatorPaymentSubmissionResponse:
+        with self._lock:
+            record = self._invoices.get(invoice_id)
+            if (
+                record is None
+                or record.creator_id != creator_id
+                or record.dispatch_id is None
+                or record.dispatched_at is None
+            ):
+                raise InvoiceNotFoundError(invoice_id)
+            self._ensure_invoice_extensions(record)
+
+            now = datetime.now(timezone.utc)
+            self._refresh_invoice_status(record, now)
+            self._refresh_invoice_notification(record)
+
+            if record.creator_payment_submitted_at is not None:
+                return CreatorPaymentSubmissionResponse(
+                    invoice_id=record.invoice_id,
+                    creator_id=record.creator_id,
+                    submitted_at=record.creator_payment_submitted_at,
+                    already_submitted=True,
+                    status=record.status,  # type: ignore[arg-type]
+                    balance_due=record.balance_due,
+                )
+
+            if record.status not in {"open", "overdue"} or record.balance_due <= 0:
+                raise ValueError("invoice is not eligible for payment submission confirmation")
+
+            record.creator_payment_submitted_at = now
+            if record.creator_payment_submission_count <= 0:
+                record.creator_payment_submission_count = 1
+            record.notification_state = "seen_unfulfilled"
+            record.updated_at = now
+            self._refresh_invoice_status(record, now)
+            self._refresh_invoice_notification(record)
+
+            return CreatorPaymentSubmissionResponse(
+                invoice_id=record.invoice_id,
+                creator_id=record.creator_id,
+                submitted_at=now,
+                already_submitted=False,
+                status=record.status,  # type: ignore[arg-type]
+                balance_due=record.balance_due,
             )
 
     def create_checkout_session(
@@ -948,6 +1093,7 @@ class InMemoryTaskStore:
             record = self._invoices.get(payload.invoice_id)
             if record is None:
                 raise InvoiceNotFoundError(payload.invoice_id)
+            self._ensure_invoice_extensions(record)
             return self._apply_payment_event_locked(
                 event_id=payload.event_id,
                 record=record,
@@ -1316,6 +1462,7 @@ class InMemoryTaskStore:
         source: str,
     ) -> PaymentEventResponse:
         now = datetime.now(timezone.utc)
+        self._ensure_invoice_extensions(record)
         if event_id in self._payment_event_index:
             self._refresh_invoice_status(record, now)
             self._refresh_invoice_notification(record)
@@ -1527,6 +1674,7 @@ class InMemoryTaskStore:
         )
 
     def _to_invoice_record(self, record: _InvoiceRecord) -> InvoiceRecord:
+        self._ensure_invoice_extensions(record)
         return InvoiceRecord(
             invoice_id=record.invoice_id,
             creator_id=record.creator_id,
@@ -1551,6 +1699,13 @@ class InMemoryTaskStore:
             last_reminder_at=record.last_reminder_at,
             updated_at=record.updated_at,
         )
+
+    @staticmethod
+    def _ensure_invoice_extensions(record: _InvoiceRecord) -> None:
+        if not hasattr(record, "creator_payment_submitted_at"):
+            record.creator_payment_submitted_at = None
+        if not hasattr(record, "creator_payment_submission_count"):
+            record.creator_payment_submission_count = 0
 
     def _evaluate_reminder(self, record: _InvoiceRecord, now: datetime) -> _ReminderDecision:
         if record.dispatch_id is None:

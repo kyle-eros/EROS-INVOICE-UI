@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
@@ -47,6 +47,7 @@ from .models import (
     ConfirmResponse,
     CreatorDispatchAcknowledgeResponse,
     CreatorInvoicesResponse,
+    CreatorPaymentSubmissionResponse,
     EscalationListResponse,
     InvoiceDispatchRequest,
     InvoiceDispatchResponse,
@@ -92,19 +93,22 @@ from .reminder_runs import ReminderWorkflowService, create_reminder_run_reposito
 from .store import (
     CreatorNotFoundError,
     DispatchNotFoundError,
-    InMemoryTaskStore,
     InvoiceDetailNotFoundError,
     InvoiceNotFoundError,
     PayoutNotFoundError,
     ReconciliationCaseNotFoundError,
     TaskNotFoundError,
 )
+from .task_store_backends import create_task_store
 from .webhook_security import verify_payment_webhook_signature
 
 _settings = get_settings()
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix=f"{_settings.api_prefix}/invoicing", tags=["invoicing"])
-task_store = InMemoryTaskStore()
+task_store = create_task_store(
+    backend=_settings.invoice_store_backend,
+    database_url=_settings.database_url,
+)
 
 
 def _create_auth_repo(settings: Settings) -> AuthStateRepository:
@@ -869,34 +873,28 @@ def admin_runtime_security(request: Request) -> RuntimeSecurityStatusResponse:
 
 
 @router.get("/admin/creators", response_model=AdminCreatorDirectoryResponse)
-def admin_creator_directory(request: Request) -> AdminCreatorDirectoryResponse:
+def admin_creator_directory(request: Request, focus_year: int | None = None) -> AdminCreatorDirectoryResponse:
     _require_admin(request)
-
-    directory: dict[str, dict[str, int | str]] = {}
-    for invoice in task_store.list_invoices():
-        bucket = directory.get(invoice.creator_id)
-        if bucket is None:
-            bucket = {
-                "creator_name": invoice.creator_name,
-                "invoice_count": 0,
-                "dispatched_invoice_count": 0,
-            }
-            directory[invoice.creator_id] = bucket
-        bucket["invoice_count"] = int(bucket["invoice_count"]) + 1
-        if invoice.dispatch_id is not None:
-            bucket["dispatched_invoice_count"] = int(bucket["dispatched_invoice_count"]) + 1
+    selected_year = focus_year if focus_year is not None else date.today().year
+    if selected_year < 2000 or selected_year > 2100:
+        raise HTTPException(400, "focus_year must be between 2000 and 2100")
 
     items = [
         AdminCreatorDirectoryItem(
-            creator_id=creator_id,
-            creator_name=str(values["creator_name"]),
-            invoice_count=int(values["invoice_count"]),
-            dispatched_invoice_count=int(values["dispatched_invoice_count"]),
-            ready_for_portal=int(values["dispatched_invoice_count"]) > 0,
+            creator_id=item.creator_id,
+            creator_name=item.creator_name,
+            invoice_count=item.invoice_count,
+            dispatched_invoice_count=item.dispatched_invoice_count,
+            unpaid_invoice_count=item.unpaid_invoice_count,
+            submitted_payment_invoice_count=item.submitted_payment_invoice_count,
+            total_balance_owed_usd=item.total_balance_owed_usd,
+            jan_full_invoice_usd=item.jan_full_invoice_usd,
+            feb_current_owed_usd=item.feb_current_owed_usd,
+            has_non_usd_open_invoices=item.has_non_usd_open_invoices,
+            ready_for_portal=item.dispatched_invoice_count > 0,
         )
-        for creator_id, values in directory.items()
+        for item in task_store.list_creator_balance_overview(focus_year=selected_year)
     ]
-    items.sort(key=lambda item: (item.creator_name.lower(), item.creator_id))
     return AdminCreatorDirectoryResponse(creators=items)
 
 
@@ -1034,6 +1032,17 @@ def get_my_invoices(request: Request) -> CreatorInvoicesResponse:
         return task_store.get_creator_invoices(creator_id)
     except CreatorNotFoundError as exc:
         raise HTTPException(404, f"creator not found: {creator_id}") from exc
+
+
+@router.post("/me/invoices/{invoice_id}/payment-submission", response_model=CreatorPaymentSubmissionResponse)
+def submit_my_invoice_payment_submission(invoice_id: str, request: Request) -> CreatorPaymentSubmissionResponse:
+    creator_id = _require_creator_session(request)
+    try:
+        return task_store.submit_creator_payment_submission(creator_id, invoice_id)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(404, f"invoice not found: {invoice_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/me/invoices/{invoice_id}/pdf")

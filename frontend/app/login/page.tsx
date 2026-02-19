@@ -156,7 +156,7 @@ export default function LoginPage() {
           <BrandWordmark size="lg" />
           <h1 className="auth-hero__title">Secure access to your creator finance portal.</h1>
           <p className="auth-hero__copy">
-            Use the passkey we sent you to enter a secure workspace for invoices, balances, and due-date tracking.
+            Use the passkey we sent to sign in securely. Once you&apos;re in, you can view invoices, check balances, and keep up with due dates in one place.
           </p>
           <ul className="auth-hero__list" aria-label="Security highlights">
             <li>Signed session token with strict cookie controls</li>

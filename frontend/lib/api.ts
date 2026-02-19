@@ -109,6 +109,7 @@ export interface CreatorInvoiceItem {
   notification_state: "unseen" | "seen_unfulfilled" | "fulfilled";
   reminder_count: number;
   has_pdf: boolean;
+  creator_payment_submitted_at: string | null;
   last_reminder_at: string | null;
 }
 
@@ -116,6 +117,15 @@ export interface CreatorInvoicesResponse {
   creator_id: string;
   creator_name: string;
   invoices: CreatorInvoiceItem[];
+}
+
+export interface CreatorPaymentSubmissionResponse {
+  invoice_id: string;
+  creator_id: string;
+  submitted_at: string;
+  already_submitted: boolean;
+  status: "open" | "partial" | "paid" | "overdue" | "escalated";
+  balance_due: number;
 }
 
 const API_BASE_URL = process.env.INVOICING_API_BASE_URL ?? "http://localhost:8000";
@@ -351,6 +361,21 @@ export async function fetchCreatorInvoicePdfBySession(sessionToken: string, invo
   });
 }
 
+export async function submitCreatorInvoicePaymentSubmissionBySession(
+  sessionToken: string,
+  invoiceId: string,
+): Promise<CreatorPaymentSubmissionResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/me/invoices/${encodeURIComponent(invoiceId)}/payment-submission`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${sessionToken}`,
+    },
+    cache: "no-store",
+  });
+  return decodeJson(response, "Creator payment submission");
+}
+
 // --- Passkey Management (admin-only) ---
 
 export async function generatePasskey(
@@ -388,6 +413,12 @@ export interface AdminCreatorDirectoryItem {
   creator_name: string;
   invoice_count: number;
   dispatched_invoice_count: number;
+  unpaid_invoice_count: number;
+  submitted_payment_invoice_count: number;
+  total_balance_owed_usd: number;
+  jan_full_invoice_usd: number;
+  feb_current_owed_usd: number;
+  has_non_usd_open_invoices: boolean;
   ready_for_portal: boolean;
 }
 
@@ -403,8 +434,12 @@ export async function listPasskeys(adminToken: string): Promise<{ creators: Pass
   return decodeJson(response, "List passkeys");
 }
 
-export async function listAdminCreators(adminToken: string): Promise<{ creators: AdminCreatorDirectoryItem[] }> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/admin/creators`, {
+export async function listAdminCreators(
+  adminToken: string,
+  options: { focusYear?: number } = {},
+): Promise<{ creators: AdminCreatorDirectoryItem[] }> {
+  const search = typeof options.focusYear === "number" ? `?focus_year=${encodeURIComponent(String(options.focusYear))}` : "";
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/admin/creators${search}`, {
     method: "GET",
     headers: {
       Accept: "application/json",

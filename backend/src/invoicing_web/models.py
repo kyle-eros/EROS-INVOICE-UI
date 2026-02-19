@@ -442,6 +442,12 @@ class AdminCreatorDirectoryItem(BaseModel):
     creator_name: str
     invoice_count: int
     dispatched_invoice_count: int
+    unpaid_invoice_count: int
+    submitted_payment_invoice_count: int
+    total_balance_owed_usd: float
+    jan_full_invoice_usd: float
+    feb_current_owed_usd: float
+    has_non_usd_open_invoices: bool
     ready_for_portal: bool
 
 
@@ -506,6 +512,7 @@ class CreatorInvoiceItem(BaseModel):
     notification_state: NotificationState
     reminder_count: int
     has_pdf: bool
+    creator_payment_submitted_at: datetime | None = None
     last_reminder_attempt_at: datetime | None = None
     last_reminder_at: datetime | None = None
 
@@ -514,6 +521,15 @@ class CreatorInvoicesResponse(BaseModel):
     creator_id: str
     creator_name: str
     invoices: list[CreatorInvoiceItem]
+
+
+class CreatorPaymentSubmissionResponse(BaseModel):
+    invoice_id: str
+    creator_id: str
+    submitted_at: datetime
+    already_submitted: bool
+    status: InvoiceStatus
+    balance_due: float
 
 
 class InvoicePdfContext(BaseModel):

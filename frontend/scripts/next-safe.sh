@@ -57,9 +57,10 @@ read_state_file() {
 write_state_file() {
   local mode="$1"
   local command="$2"
+  local pid="${3:-$$}"
   cat > "$STATE_FILE" <<EOF
 mode=$mode
-pid=$$
+pid=$pid
 started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 command=$command
 EOF
@@ -115,6 +116,13 @@ clean_on_mode_switch_if_needed() {
   fi
 }
 
+clean_production_artifacts_before_dev_if_needed() {
+  if [[ -f "$DIST_DIR/BUILD_ID" ]]; then
+    echo "info: detected production build artifacts in $DIST_DIR; cleaning before next dev."
+    rm -rf "$DIST_DIR"
+  fi
+}
+
 entrypoint_has_chunk_resolution_error() {
   local entrypoint="$1"
   local output=""
@@ -158,6 +166,7 @@ clean_inconsistent_runtime_artifacts_if_needed() {
 
 validate_runtime_artifacts_or_fail() {
   local context="$1"
+  local require_build_id="${2:-0}"
   local required_paths=(
     "$DIST_DIR/server"
     "$DIST_DIR/server/app"
@@ -181,6 +190,10 @@ validate_runtime_artifacts_or_fail() {
 
   if [[ "$has_chunk_artifacts" -eq 0 ]]; then
     missing+=("$DIST_DIR/server/chunks/*.js or $DIST_DIR/server/vendor-chunks/*.js")
+  fi
+
+  if [[ "$require_build_id" == "1" ]] && [[ ! -f "$DIST_DIR/BUILD_ID" ]]; then
+    missing+=("$DIST_DIR/BUILD_ID (required for next start; current artifacts are not from next build)")
   fi
 
   if command -v rg >/dev/null 2>&1; then
@@ -210,6 +223,9 @@ validate_runtime_artifacts_or_fail() {
 }
 
 release_guard_on_exit() {
+  if [[ -n "${ACTIVE_CHILD_PID:-}" ]] && is_pid_alive "${ACTIVE_CHILD_PID:-}"; then
+    kill "$ACTIVE_CHILD_PID" 2>/dev/null || true
+  fi
   clear_state_file
 }
 
@@ -233,14 +249,18 @@ dev_command() {
   clear_stale_state_if_needed
   active_state_guard_or_fail
   clean_on_mode_switch_if_needed "dev"
+  clean_production_artifacts_before_dev_if_needed
   clean_inconsistent_runtime_artifacts_if_needed
   record_last_mode "dev"
 
-  write_state_file "dev" "next dev"
+  ACTIVE_CHILD_PID=""
   trap release_guard_on_exit EXIT INT TERM
 
   cd "$FRONTEND_DIR"
-  next dev "$@"
+  next dev "$@" &
+  ACTIVE_CHILD_PID="$!"
+  write_state_file "dev" "next dev" "$ACTIVE_CHILD_PID"
+  wait "$ACTIVE_CHILD_PID"
 }
 
 build_command() {
@@ -263,13 +283,16 @@ start_command() {
   active_state_guard_or_fail
   clean_on_mode_switch_if_needed "prod"
   record_last_mode "prod"
-  validate_runtime_artifacts_or_fail "next start preflight"
+  validate_runtime_artifacts_or_fail "next start preflight" "1"
 
-  write_state_file "start" "next start"
+  ACTIVE_CHILD_PID=""
   trap release_guard_on_exit EXIT INT TERM
 
   cd "$FRONTEND_DIR"
-  next start "$@"
+  next start "$@" &
+  ACTIVE_CHILD_PID="$!"
+  write_state_file "start" "next start" "$ACTIVE_CHILD_PID"
+  wait "$ACTIVE_CHILD_PID"
 }
 
 clean_command() {

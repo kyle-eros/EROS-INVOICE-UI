@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AdminLogoutButton } from "./AdminLogoutButton";
+import { CreatorBalancesSection } from "./CreatorBalancesSection";
 import { AdminPasskeyFlash } from "./AdminPasskeyFlash";
 import { BrandWordmark } from "../components/BrandWordmark";
 import { DataTable, type DataColumn } from "../components/DataTable";
@@ -55,6 +56,14 @@ const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
   currency: "USD",
   minimumFractionDigits: 2,
 });
+
+const DEMO_FOCUS_YEAR = (() => {
+  const parsed = Number.parseInt(process.env.DEMO_FOCUS_YEAR ?? "2026", 10);
+  if (Number.isFinite(parsed) && parsed >= 2000 && parsed <= 2100) {
+    return parsed;
+  }
+  return 2026;
+})();
 
 const STATUS_TONE: Record<TaskSummary["status"], StatusTone> = {
   previewed: "warning",
@@ -166,7 +175,7 @@ async function generatePasskeyAction(formData: FormData) {
   let targetCreatorId = creatorId;
   let targetCreatorName = creatorName;
   try {
-    const creators = await listAdminCreators(adminToken);
+    const creators = await listAdminCreators(adminToken, { focusYear: DEMO_FOCUS_YEAR });
     const matched = creators.creators.find((item) => item.creator_id === creatorId);
     if (!matched && !forceIssueUnready) {
       revalidatePath("/admin");
@@ -321,7 +330,8 @@ export default async function AdminPage({
   const adminToken = cookieStore.get("admin_session")?.value ?? "";
 
   try {
-    tasks = await listTasks();
+    const result = await listTasks();
+    tasks = Array.isArray(result) ? result : [];
   } catch (error) {
     loadError = error instanceof Error ? error.message : "Unable to load tasks";
   }
@@ -335,7 +345,7 @@ export default async function AdminPage({
       listReminderEscalations(adminToken),
     ]);
     reminderSummary = summary;
-    reminderEscalations = escalations.items;
+    reminderEscalations = Array.isArray(escalations.items) ? escalations.items : [];
   } catch (error) {
     reminderError = error instanceof Error ? error.message : "Unable to load reminder data";
   }
@@ -350,7 +360,7 @@ export default async function AdminPage({
   try {
     if (adminToken) {
       const result = await listPasskeys(adminToken);
-      passkeys = result.creators;
+      passkeys = Array.isArray(result.creators) ? result.creators : [];
     }
   } catch (error) {
     passkeyError = error instanceof Error ? error.message : "Unable to load passkeys";
@@ -358,8 +368,8 @@ export default async function AdminPage({
 
   try {
     if (adminToken) {
-      const result = await listAdminCreators(adminToken);
-      creatorDirectory = result.creators;
+      const result = await listAdminCreators(adminToken, { focusYear: DEMO_FOCUS_YEAR });
+      creatorDirectory = Array.isArray(result.creators) ? result.creators : [];
     }
   } catch (error) {
     creatorDirectoryError = error instanceof Error ? error.message : "Unable to load creator directory";
@@ -368,7 +378,7 @@ export default async function AdminPage({
   try {
     if (adminToken) {
       const result = await listAdminConversations(adminToken);
-      conversationThreads = result.items;
+      conversationThreads = Array.isArray(result.items) ? result.items : [];
     }
   } catch (error) {
     conversationError = error instanceof Error ? error.message : "Unable to load conversation inbox";
@@ -558,6 +568,8 @@ export default async function AdminPage({
           )}
         </SurfaceCard>
 
+        <CreatorBalancesSection creators={creatorDirectory} loadError={creatorDirectoryError} focusYear={DEMO_FOCUS_YEAR} />
+
         {/* ── Conversation Inbox ── */}
         <SurfaceCard as="section" className="invoicing-table-card reveal-item" data-delay="1">
           <div className="invoicing-table-card__head">
@@ -677,7 +689,7 @@ export default async function AdminPage({
                         <tr key={pk.creator_id}>
                           <td><span className="task-id">{pk.creator_id}</span></td>
                           <td>{pk.creator_name}</td>
-                          <td><code style={{ fontSize: "0.85rem", padding: "2px 6px", borderRadius: "4px", background: "rgba(123, 184, 244, 0.12)", color: "var(--brand-primary-soft)" }}>{pk.display_prefix}...</code></td>
+                          <td><code className="passkey-prefix-code" suppressHydrationWarning>{pk.display_prefix}...</code></td>
                           <td><span className="muted-small">{formatTimestamp(pk.created_at)}</span></td>
                           <td>
                             <form action={revokePasskeyAction} style={{ display: "inline" }}>

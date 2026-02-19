@@ -30,6 +30,10 @@ def _client() -> TestClient:
     os.environ["CONVERSATION_WEBHOOK_SIGNATURE_MODE"] = "off"
     from invoicing_web.config import get_settings
     api_module._settings = get_settings()
+    api_module.task_store = api_module.create_task_store(
+        backend=api_module._settings.invoice_store_backend,
+        database_url=api_module._settings.database_url,
+    )
     api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
     api_module.reminder_run_repo = api_module.create_reminder_run_repository(
         backend=api_module._settings.reminder_store_backend,

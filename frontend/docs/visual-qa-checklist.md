@@ -23,11 +23,15 @@
 - [ ] Empty task list shows intended empty state.
 - [ ] Reminder API failure shows alert panel/error text.
 - [ ] Queue metric card reflects error and non-error state correctly.
+- [ ] Creator Balances Owed section renders Jan full invoice + Feb current owed columns correctly for the focus year.
+- [ ] Creator Balances Owed section shows non-USD exclusion note when applicable.
 
 ## Creator Portal States
-- [ ] `/portal` summary card shows correct outstanding count and correct outstanding totals per currency.
+- [ ] `/portal` summary card shows January full invoice totals and February current owed totals for the focus year.
+- [ ] `/portal` invoice table is filtered to January/February focus-year rows only.
 - [ ] Invoice table status badge matches backend status (`open`, `partial`, `overdue`, `escalated`, `paid`).
 - [ ] Currency column renders correctly and Amount Paid + Balance Due values use the invoice currency.
+- [ ] Open/overdue invoice rows show a `Click here to confirm payment submitted` action, and submitted rows show a non-clickable submitted state.
 - [ ] No stale claims about “marking invoices paid” appear anywhere in portal/home copy.
 
 ## Invoice Detail + PDF Experience

@@ -9,6 +9,7 @@
 .env
 .env.*
 !.env.example
+.claude/
 
 # Python backend
 backend/.pytest_cache/
@@ -38,6 +39,9 @@ tmp/
 data/
 exports/
 *.log
+invoicing_web.db
+scripts/__pycache__/
 
 # Local source-data caches
+90d-earnings/
 90d-earnings/.mypy_cache/

@@ -22,6 +22,10 @@ def _client() -> TestClient:
     # Recreate settings to pick up env var
     from invoicing_web.config import get_settings
     api_module._settings = get_settings()
+    api_module.task_store = api_module.create_task_store(
+        backend=api_module._settings.invoice_store_backend,
+        database_url=api_module._settings.database_url,
+    )
     api_module.auth_repo = api_module._create_auth_repo(api_module._settings)
     api_module.reminder_run_repo = api_module.create_reminder_run_repository(
         backend=api_module._settings.reminder_store_backend,
@@ -274,6 +278,125 @@ def test_session_grants_invoice_access() -> None:
     assert data["invoices"][0]["currency"] == "USD"
     assert data["invoices"][0]["issued_at"] == "2026-02-01"
     assert data["invoices"][0]["has_pdf"] is False
+    assert data["invoices"][0]["creator_payment_submitted_at"] is None
+
+
+def test_creator_payment_submission_is_idempotent() -> None:
+    client = _client()
+    admin_token = _admin_token(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    _seed_creator_invoices(client, "creator-011", "Kai")
+    raw_passkey = client.post(
+        "/api/v1/invoicing/passkeys/generate",
+        json={"creator_id": "creator-011", "creator_name": "Kai"},
+        headers=headers,
+    ).json()["passkey"]
+    session_token = client.post("/api/v1/invoicing/auth/confirm", json={"passkey": raw_passkey}).json()["session_token"]
+    creator_headers = {"Authorization": f"Bearer {session_token}"}
+
+    first_submit = client.post(
+        "/api/v1/invoicing/me/invoices/inv-creator-011/payment-submission",
+        headers=creator_headers,
+    )
+    assert first_submit.status_code == 200
+    first_payload = first_submit.json()
+    assert first_payload["invoice_id"] == "inv-creator-011"
+    assert first_payload["creator_id"] == "creator-011"
+    assert first_payload["already_submitted"] is False
+    assert first_payload["status"] == "open"
+    submitted_at = first_payload["submitted_at"]
+    assert submitted_at
+
+    second_submit = client.post(
+        "/api/v1/invoicing/me/invoices/inv-creator-011/payment-submission",
+        headers=creator_headers,
+    )
+    assert second_submit.status_code == 200
+    second_payload = second_submit.json()
+    assert second_payload["already_submitted"] is True
+    assert second_payload["submitted_at"] == submitted_at
+
+    invoices_resp = client.get("/api/v1/invoicing/me/invoices", headers=creator_headers)
+    assert invoices_resp.status_code == 200
+    invoice_item = invoices_resp.json()["invoices"][0]
+    assert invoice_item["invoice_id"] == "inv-creator-011"
+    assert invoice_item["creator_payment_submitted_at"] == submitted_at
+
+
+def test_creator_payment_submission_rejects_non_owner() -> None:
+    client = _client()
+    admin_token = _admin_token(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    _seed_creator_invoices(client, "creator-012", "Lena")
+    _seed_creator_invoices(client, "creator-013", "Mina")
+
+    raw_passkey = client.post(
+        "/api/v1/invoicing/passkeys/generate",
+        json={"creator_id": "creator-013", "creator_name": "Mina"},
+        headers=headers,
+    ).json()["passkey"]
+    session_token = client.post("/api/v1/invoicing/auth/confirm", json={"passkey": raw_passkey}).json()["session_token"]
+
+    submit_resp = client.post(
+        "/api/v1/invoicing/me/invoices/inv-creator-012/payment-submission",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+    assert submit_resp.status_code == 404
+
+
+def test_creator_payment_submission_rejects_ineligible_invoice() -> None:
+    client = _client()
+    admin_token = _admin_token(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    upsert = client.post(
+        "/api/v1/invoicing/invoices/upsert",
+        json={
+            "invoices": [
+                {
+                    "invoice_id": "inv-creator-paid",
+                    "creator_id": "creator-paid",
+                    "creator_name": "Paid Creator",
+                    "creator_timezone": "UTC",
+                    "contact_channel": "email",
+                    "contact_target": "paid@example.com",
+                    "currency": "USD",
+                    "amount_due": 100.0,
+                    "amount_paid": 100.0,
+                    "issued_at": "2026-02-01",
+                    "due_date": "2026-03-01",
+                }
+            ]
+        },
+    )
+    assert upsert.status_code == 200
+
+    dispatch = client.post(
+        "/api/v1/invoicing/invoices/dispatch",
+        json={
+            "invoice_id": "inv-creator-paid",
+            "dispatched_at": "2026-02-10T00:00:00Z",
+            "channels": ["email"],
+            "recipient_email": "paid@example.com",
+        },
+    )
+    assert dispatch.status_code == 200
+
+    raw_passkey = client.post(
+        "/api/v1/invoicing/passkeys/generate",
+        json={"creator_id": "creator-paid", "creator_name": "Paid Creator"},
+        headers=headers,
+    ).json()["passkey"]
+    session_token = client.post("/api/v1/invoicing/auth/confirm", json={"passkey": raw_passkey}).json()["session_token"]
+
+    submit_resp = client.post(
+        "/api/v1/invoicing/me/invoices/inv-creator-paid/payment-submission",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+    assert submit_resp.status_code == 409
+    assert "not eligible" in submit_resp.json()["detail"]
 
 
 def test_creator_pdf_requires_session() -> None:
@@ -438,6 +561,19 @@ def test_admin_creator_directory_reports_portal_readiness() -> None:
         json={
             "invoices": [
                 {
+                    "invoice_id": "inv-creator-ready-eur",
+                    "creator_id": "creator-ready",
+                    "creator_name": "Ready Creator",
+                    "creator_timezone": "UTC",
+                    "contact_channel": "email",
+                    "contact_target": "ready@example.com",
+                    "currency": "EUR",
+                    "amount_due": 40.25,
+                    "amount_paid": 0.0,
+                    "issued_at": "2026-02-06",
+                    "due_date": "2026-03-06",
+                },
+                {
                     "invoice_id": "inv-creator-unready",
                     "creator_id": "creator-unready",
                     "creator_name": "Unready Creator",
@@ -449,24 +585,80 @@ def test_admin_creator_directory_reports_portal_readiness() -> None:
                     "amount_paid": 0.0,
                     "issued_at": "2026-02-05",
                     "due_date": "2026-03-05",
+                },
+                {
+                    "invoice_id": "inv-creator-unready-paid",
+                    "creator_id": "creator-unready",
+                    "creator_name": "Unready Creator",
+                    "creator_timezone": "UTC",
+                    "contact_channel": "email",
+                    "contact_target": "unready@example.com",
+                    "currency": "USD",
+                    "amount_due": 100.0,
+                    "amount_paid": 100.0,
+                    "issued_at": "2026-02-01",
+                    "due_date": "2026-03-01",
                 }
             ]
         },
     )
     assert upsert.status_code == 200
 
-    directory = client.get("/api/v1/invoicing/admin/creators", headers=headers)
+    directory = client.get("/api/v1/invoicing/admin/creators?focus_year=2026", headers=headers)
     assert directory.status_code == 200
     payload = directory.json()
     creators = {item["creator_id"]: item for item in payload["creators"]}
 
-    assert creators["creator-ready"]["invoice_count"] == 1
+    assert creators["creator-ready"]["invoice_count"] == 2
     assert creators["creator-ready"]["dispatched_invoice_count"] == 1
+    assert creators["creator-ready"]["unpaid_invoice_count"] == 2
+    assert creators["creator-ready"]["submitted_payment_invoice_count"] == 0
+    assert creators["creator-ready"]["total_balance_owed_usd"] == 500.0
+    assert creators["creator-ready"]["jan_full_invoice_usd"] == 0.0
+    assert creators["creator-ready"]["feb_current_owed_usd"] == 500.0
+    assert creators["creator-ready"]["has_non_usd_open_invoices"] is True
     assert creators["creator-ready"]["ready_for_portal"] is True
 
-    assert creators["creator-unready"]["invoice_count"] == 1
+    assert creators["creator-unready"]["invoice_count"] == 2
     assert creators["creator-unready"]["dispatched_invoice_count"] == 0
+    assert creators["creator-unready"]["unpaid_invoice_count"] == 1
+    assert creators["creator-unready"]["submitted_payment_invoice_count"] == 0
+    assert creators["creator-unready"]["total_balance_owed_usd"] == 250.0
+    assert creators["creator-unready"]["jan_full_invoice_usd"] == 0.0
+    assert creators["creator-unready"]["feb_current_owed_usd"] == 250.0
+    assert creators["creator-unready"]["has_non_usd_open_invoices"] is False
     assert creators["creator-unready"]["ready_for_portal"] is False
+
+    previous_year = client.get("/api/v1/invoicing/admin/creators?focus_year=2025", headers=headers)
+    assert previous_year.status_code == 200
+    previous_creators = {item["creator_id"]: item for item in previous_year.json()["creators"]}
+    assert previous_creators["creator-ready"]["jan_full_invoice_usd"] == 0.0
+    assert previous_creators["creator-ready"]["feb_current_owed_usd"] == 0.0
+
+
+def test_admin_creator_directory_reports_submitted_payment_counts() -> None:
+    client = _client()
+    admin_token = _admin_token(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    _seed_creator_invoices(client, "creator-submit", "Submit Creator")
+    raw_passkey = client.post(
+        "/api/v1/invoicing/passkeys/generate",
+        json={"creator_id": "creator-submit", "creator_name": "Submit Creator"},
+        headers=headers,
+    ).json()["passkey"]
+    session_token = client.post("/api/v1/invoicing/auth/confirm", json={"passkey": raw_passkey}).json()["session_token"]
+
+    submit_resp = client.post(
+        "/api/v1/invoicing/me/invoices/inv-creator-submit/payment-submission",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+    assert submit_resp.status_code == 200
+
+    directory = client.get("/api/v1/invoicing/admin/creators?focus_year=2026", headers=headers)
+    assert directory.status_code == 200
+    creators = {item["creator_id"]: item for item in directory.json()["creators"]}
+    assert creators["creator-submit"]["submitted_payment_invoice_count"] == 1
 
 
 def test_regenerate_invalidates_existing_creator_sessions() -> None:

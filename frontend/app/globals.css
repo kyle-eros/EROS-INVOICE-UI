@@ -27,6 +27,7 @@
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
+  --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
   --space-12: 48px;
@@ -370,6 +371,32 @@ th {
   min-height: 30px;
 }
 
+.invoice-payment-submit-form {
+  display: inline;
+}
+
+.invoice-payment-submit-button {
+  padding: 4px 12px;
+  font-size: 0.75rem;
+  min-height: 30px;
+  line-height: 1.2;
+}
+
+.invoice-payment-submitted-label {
+  color: #d6f8e8;
+  border: 1px solid rgba(79, 178, 134, 0.5);
+  background: rgba(79, 178, 134, 0.2);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.73rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .invoice-detail-header__row {
   display: flex;
   justify-content: space-between;
@@ -558,6 +585,58 @@ th {
   font-size: 0.9rem;
 }
 
+.creator-balance-card {
+  gap: var(--space-5);
+}
+
+.creator-balance-kpi-grid {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.creator-balance-kpi {
+  border: 1px solid rgba(123, 184, 244, 0.3);
+  border-radius: var(--radius-md);
+  background: rgba(123, 184, 244, 0.08);
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.creator-balance-kpi span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.creator-balance-kpi strong {
+  color: var(--text-strong);
+  font-size: 1.22rem;
+  line-height: 1.2;
+  font-family: var(--font-display), "Bodoni MT", "Times New Roman", serif;
+}
+
+.creator-balance-row__creator {
+  display: grid;
+  gap: 2px;
+}
+
+.creator-balance-row__creator-id {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.creator-balance-row__amount {
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.creator-balance-note {
+  color: #f6e3ba;
+}
+
 .task-id {
   color: var(--text-strong);
   font-weight: 600;
@@ -675,6 +754,10 @@ th {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .creator-balance-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .escalation-list li {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
@@ -714,6 +797,10 @@ th {
   }
 
   .reminder-metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .creator-balance-kpi-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1104,6 +1191,10 @@ th {
   opacity: 0.75;
 }
 
+.auth-scene--gate::before {
+  opacity: 0.9;
+}
+
 .auth-layout {
   position: relative;
   z-index: 1;
@@ -1198,6 +1289,13 @@ th {
 
 .auth-panel--gate {
   max-width: 420px;
+  border-color: rgba(170, 218, 255, 0.48);
+  background:
+    linear-gradient(158deg, rgba(186, 227, 255, 0.2) 0%, rgba(186, 227, 255, 0.04) 44%, rgba(14, 24, 40, 0.9) 100%),
+    rgba(9, 18, 33, 0.9);
+  box-shadow:
+    var(--shadow-elev-2),
+    0 0 68px -26px rgba(134, 201, 255, 0.5);
 }
 
 .auth-form {
@@ -1234,6 +1332,22 @@ th {
   font-weight: 700;
 }
 
+.auth-password-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: stretch;
+}
+
+.auth-password-toggle {
+  min-width: 88px;
+  padding-inline: var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: 0.83rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .auth-input {
   appearance: none;
   width: 100%;
@@ -1268,6 +1382,7 @@ th {
 .auth-submit {
   width: 100%;
   min-height: 44px;
+  letter-spacing: 0.03em;
 }
 
 .auth-identity {
@@ -1402,6 +1517,14 @@ th {
   font-weight: 600;
 }
 
+.passkey-prefix-code {
+  font-size: 0.85rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(123, 184, 244, 0.12);
+  color: var(--brand-primary-soft);
+}
+
 /* ── Creator Access Management (Admin) ── */
 
 .passkey-mgmt {
@@ -1477,6 +1600,10 @@ th {
   }
 
   .passkey-mgmt__form {
+    grid-template-columns: 1fr;
+  }
+
+  .auth-password-row {
     grid-template-columns: 1fr;
   }
 }

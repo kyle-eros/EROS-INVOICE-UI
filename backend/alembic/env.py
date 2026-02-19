@@ -9,6 +9,7 @@ from sqlalchemy import engine_from_config, pool
 from invoicing_web.auth_store import AuthStateBase
 from invoicing_web.conversations import ConversationsBase
 from invoicing_web.reminder_runs import ReminderRunsBase
+from invoicing_web.task_store_backends import InvoiceStoreBase
 
 config = context.config
 
@@ -25,6 +26,7 @@ target_metadata = [
         getattr(AuthStateBase, "metadata", None),
         getattr(ReminderRunsBase, "metadata", None),
         getattr(ConversationsBase, "metadata", None),
+        getattr(InvoiceStoreBase, "metadata", None),
     )
     if value is not None
 ]

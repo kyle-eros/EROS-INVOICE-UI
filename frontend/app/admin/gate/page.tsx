@@ -14,13 +14,28 @@ interface AdminLoginResponse {
 export default function AdminGatePage() {
   const router = useRouter();
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const requestVersionRef = useRef(0);
   const inFlightControllerRef = useRef<AbortController | null>(null);
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    const syncFromInput = () => {
+      const currentValue = passwordInputRef.current?.value ?? "";
+      setPassword((previous) => (previous === currentValue ? previous : currentValue));
+    };
+
+    syncFromInput();
+    const intervalId = window.setInterval(syncFromInput, 250);
+    const timeoutId = window.setTimeout(() => {
+      window.clearInterval(intervalId);
+    }, 2000);
+
     return () => {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
       inFlightControllerRef.current?.abort();
       inFlightControllerRef.current = null;
     };
@@ -40,8 +55,17 @@ export default function AdminGatePage() {
 
   async function handleLoginSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const normalizedPassword = password.trim();
-    if (!normalizedPassword || loading) {
+    if (loading) {
+      return;
+    }
+
+    const formData = new FormData(event.currentTarget);
+    const rawPassword = String(formData.get("password") ?? "");
+    const normalizedPassword = rawPassword.trim();
+    setPassword(rawPassword);
+
+    if (!normalizedPassword) {
+      setError("Admin password is required.");
       return;
     }
 
@@ -78,6 +102,13 @@ export default function AdminGatePage() {
     }
   }
 
+  function handlePasswordInput(value: string): void {
+    setPassword(value);
+    if (error) {
+      setError(null);
+    }
+  }
+
   return (
     <main id="main-content" className="auth-scene auth-scene--gate">
       <div className="auth-layout auth-layout--gate">
@@ -88,6 +119,11 @@ export default function AdminGatePage() {
           <p className="auth-hero__copy">
             Restricted entry for authorized finance, operations, and compliance staff.
           </p>
+          <ul className="auth-hero__list" aria-label="Admin security highlights">
+            <li>Session-protected dashboard with strict cookie scope</li>
+            <li>Credential validation with rate-limit enforcement</li>
+            <li>Audit-safe access path for finance and operations workflows</li>
+          </ul>
         </header>
 
         <SurfaceCard className="auth-panel auth-panel--gate reveal-item" data-delay="1">
@@ -98,16 +134,30 @@ export default function AdminGatePage() {
             </div>
             <div className="auth-field">
               <label htmlFor="admin-password">Admin password</label>
-              <input
-                className="auth-input"
-                id="admin-password"
-                type="password"
-                placeholder="Enter admin password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                autoComplete="current-password"
-                autoFocus
-              />
+              <div className="auth-password-row">
+                <input
+                  ref={passwordInputRef}
+                  className="auth-input"
+                  id="admin-password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="Enter admin password"
+                  value={password}
+                  onChange={(event) => handlePasswordInput(event.target.value)}
+                  onInput={(event) => handlePasswordInput(event.currentTarget.value)}
+                  autoComplete="current-password"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className="button-link button-link--secondary auth-password-toggle"
+                  onClick={() => setShowPassword((current) => !current)}
+                  aria-label={showPassword ? "Hide password text" : "Show password text"}
+                  aria-pressed={showPassword}
+                >
+                  {showPassword ? "Hide" : "Show"}
+                </button>
+              </div>
             </div>
             {error ? (
               <p className="auth-feedback auth-feedback--error" role="alert" aria-live="polite">
@@ -117,7 +167,7 @@ export default function AdminGatePage() {
             <button
               className="button-link auth-submit"
               type="submit"
-              disabled={loading || !password.trim()}
+              disabled={loading}
             >
               {loading ? "Verifying..." : "Enter Dashboard"}
             </button>
