@@ -20,6 +20,7 @@ import {
   listAdminCreators,
   listAdminConversations,
   generatePasskey,
+  getAdminRuntimeSecurity,
   getReminderSummary,
   listPasskeys,
   listReminderEscalations,
@@ -28,6 +29,7 @@ import {
   runReminderCycle,
   sendReminderRun,
   type AdminCreatorDirectoryItem,
+  type AdminRuntimeSecurityStatus,
   type ConversationThreadItem,
   type PasskeyListItem,
   type ReminderEscalation,
@@ -57,7 +59,8 @@ const CURRENCY_FORMATTER = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
 });
 
-const DEMO_FOCUS_YEAR = (() => {
+// Keep this env key for compatibility with existing backend/admin creator APIs.
+const CREATOR_DIRECTORY_FOCUS_YEAR = (() => {
   const parsed = Number.parseInt(process.env.DEMO_FOCUS_YEAR ?? "2026", 10);
   if (Number.isFinite(parsed) && parsed >= 2000 && parsed <= 2100) {
     return parsed;
@@ -71,11 +74,13 @@ const STATUS_TONE: Record<TaskSummary["status"], StatusTone> = {
   completed: "success",
 };
 
-function formatConversationChannel(channel: ConversationThreadItem["channel"]): string {
-  if (channel === "imessage") {
-    return "iMessage";
-  }
-  return channel.toUpperCase();
+type ProductionHealthState = "good" | "attention" | "unavailable";
+
+interface ProductionHealthSignal {
+  key: string;
+  label: string;
+  state: ProductionHealthState;
+  detail: string;
 }
 
 interface AdminPageSearchParams {
@@ -89,6 +94,15 @@ interface AdminPageSearchParams {
   passkeyGen?: string;
   passkeyGenReason?: string;
   passkeyRevoke?: string;
+  creator_q?: string;
+  creator_owed_only?: string;
+}
+
+function formatConversationChannel(channel: ConversationThreadItem["channel"]): string {
+  if (channel === "imessage") {
+    return "iMessage";
+  }
+  return channel.toUpperCase();
 }
 
 async function runRemindersAction(formData: FormData) {
@@ -175,7 +189,7 @@ async function generatePasskeyAction(formData: FormData) {
   let targetCreatorId = creatorId;
   let targetCreatorName = creatorName;
   try {
-    const creators = await listAdminCreators(adminToken, { focusYear: DEMO_FOCUS_YEAR });
+    const creators = await listAdminCreators(adminToken, { focusYear: CREATOR_DIRECTORY_FOCUS_YEAR });
     const matched = creators.creators.find((item) => item.creator_id === creatorId);
     if (!matched && !forceIssueUnready) {
       revalidatePath("/admin");
@@ -201,6 +215,7 @@ async function generatePasskeyAction(formData: FormData) {
     cookieStore.set(
       ADMIN_PASSKEY_FLASH_COOKIE,
       encodeAdminPasskeyFlash({
+        creator_id: result.creator_id,
         creator_name: targetCreatorName,
         passkey: result.passkey,
       }),
@@ -259,51 +274,72 @@ function getLatestTimestamp(tasks: TaskSummary[]): string | null {
 
 function runMessage(reminderRun: string | undefined, mode: string): string | null {
   if (reminderRun === "success") {
-    return mode === "live" ? "Reminders sent successfully." : "Test run complete — no messages were sent.";
+    return mode === "live"
+      ? "Live reminders were sent successfully."
+      : "Preview complete. No reminders were sent.";
   }
   if (reminderRun === "error") {
-    return mode === "live" ? "Failed to send reminders. Please try again." : "Test run failed. Please try again.";
+    return mode === "live"
+      ? "Live reminder send failed. Please try again."
+      : "Preview failed. Please try again.";
   }
   return null;
 }
 
 function evalMessage(reminderEval: string | undefined): string | null {
   if (reminderEval === "success") {
-    return "Live run evaluated successfully. Review the pending run details before sending.";
+    return "Live send prepared. Review the pending run details, then send when ready.";
   }
   if (reminderEval === "error") {
-    return "Failed to evaluate live reminder run. Please try again.";
+    return "Could not prepare live send. Please try again.";
   }
   return null;
 }
 
 function sendMessage(reminderSend: string | undefined): string | null {
   if (reminderSend === "success") {
-    return "Evaluated reminder run sent successfully.";
+    return "Prepared reminder run sent successfully.";
   }
   if (reminderSend === "error") {
-    return "Failed to send the evaluated reminder run. Please try again.";
+    return "Prepared reminder run failed to send. Please try again.";
   }
   return null;
 }
 
 function passkeyGenMessage(reason: string | undefined): string {
   if (reason === "missing_fields") {
-    return "Creator ID and Creator Name are required.";
+    return "Creator ID and creator name are required.";
   }
   if (reason === "unknown_creator") {
-    return "Creator ID not found in invoice records. Use a known creator or enable manual override.";
+    return "Creator ID was not found in current records. Use a known creator or enable manual override.";
   }
   if (reason === "no_dispatched_invoices") {
-    return "This creator has no dispatched invoices yet. Dispatch at least one invoice first, or use manual override.";
+    return "This creator does not have a dispatched invoice yet. Dispatch first, or use manual override.";
   }
   if (reason === "directory_unavailable") {
-    return "Creator validation is currently unavailable. Retry, or use manual override if urgent.";
+    return "Creator validation is currently unavailable. Try again, or use manual override if needed.";
   }
-  if (reason === "generate_failed") {
-    return "Failed to generate passkey. Please try again.";
+  return "Passkey generation failed. Please try again.";
+}
+
+function healthTone(state: ProductionHealthState): StatusTone {
+  if (state === "good") {
+    return "success";
   }
-  return "Failed to generate passkey. Please try again.";
+  if (state === "attention") {
+    return "warning";
+  }
+  return "muted";
+}
+
+function healthLabel(state: ProductionHealthState): string {
+  if (state === "good") {
+    return "good";
+  }
+  if (state === "attention") {
+    return "attention";
+  }
+  return "unavailable";
 }
 
 export default async function AdminPage({
@@ -320,14 +356,23 @@ export default async function AdminPage({
   const pendingRunId = resolvedSearchParams.pendingRunId ?? null;
   const pendingEligible = Number.parseInt(resolvedSearchParams.pendingEligible ?? "", 10);
   const pendingEvaluated = Number.parseInt(resolvedSearchParams.pendingEvaluated ?? "", 10);
+  const initialCreatorQuery = (resolvedSearchParams.creator_q ?? "").trim();
+  const creatorOwedOnlyParam = (resolvedSearchParams.creator_owed_only ?? "").trim().toLowerCase();
+  const initialCreatorOwedOnly = creatorOwedOnlyParam === "" || !["0", "false", "off", "no"].includes(creatorOwedOnlyParam);
+
+  const cookieStore = await cookies();
+  const adminToken = cookieStore.get("admin_session")?.value ?? "";
+  if (!adminToken) {
+    redirect("/admin/gate");
+  }
 
   let tasks: TaskSummary[] = [];
   let loadError: string | null = null;
   let reminderSummary: ReminderSummary | null = null;
   let reminderEscalations: ReminderEscalation[] = [];
   let reminderError: string | null = null;
-  const cookieStore = await cookies();
-  const adminToken = cookieStore.get("admin_session")?.value ?? "";
+  let runtimeSecurity: AdminRuntimeSecurityStatus | null = null;
+  let runtimeSecurityError: string | null = null;
 
   try {
     const result = await listTasks();
@@ -337,9 +382,6 @@ export default async function AdminPage({
   }
 
   try {
-    if (!adminToken) {
-      redirect("/admin/gate");
-    }
     const [summary, escalations] = await Promise.all([
       getReminderSummary(adminToken),
       listReminderEscalations(adminToken),
@@ -350,6 +392,12 @@ export default async function AdminPage({
     reminderError = error instanceof Error ? error.message : "Unable to load reminder data";
   }
 
+  try {
+    runtimeSecurity = await getAdminRuntimeSecurity(adminToken);
+  } catch (error) {
+    runtimeSecurityError = error instanceof Error ? error.message : "Unable to load runtime security";
+  }
+
   let passkeys: PasskeyListItem[] = [];
   let passkeyError: string | null = null;
   let creatorDirectory: AdminCreatorDirectoryItem[] = [];
@@ -358,28 +406,22 @@ export default async function AdminPage({
   let conversationError: string | null = null;
 
   try {
-    if (adminToken) {
-      const result = await listPasskeys(adminToken);
-      passkeys = Array.isArray(result.creators) ? result.creators : [];
-    }
+    const result = await listPasskeys(adminToken);
+    passkeys = Array.isArray(result.creators) ? result.creators : [];
   } catch (error) {
     passkeyError = error instanceof Error ? error.message : "Unable to load passkeys";
   }
 
   try {
-    if (adminToken) {
-      const result = await listAdminCreators(adminToken, { focusYear: DEMO_FOCUS_YEAR });
-      creatorDirectory = Array.isArray(result.creators) ? result.creators : [];
-    }
+    const result = await listAdminCreators(adminToken, { focusYear: CREATOR_DIRECTORY_FOCUS_YEAR });
+    creatorDirectory = Array.isArray(result.creators) ? result.creators : [];
   } catch (error) {
     creatorDirectoryError = error instanceof Error ? error.message : "Unable to load creator directory";
   }
 
   try {
-    if (adminToken) {
-      const result = await listAdminConversations(adminToken);
-      conversationThreads = Array.isArray(result.items) ? result.items : [];
-    }
+    const result = await listAdminConversations(adminToken);
+    conversationThreads = Array.isArray(result.items) ? result.items : [];
   } catch (error) {
     conversationError = error instanceof Error ? error.message : "Unable to load conversation inbox";
   }
@@ -389,6 +431,68 @@ export default async function AdminPage({
   const passkeyRevokeState = resolvedSearchParams.passkeyRevoke;
   const passkeyGenError = passkeyGenState === "error" ? passkeyGenMessage(passkeyGenReason) : null;
   const readyCreators = creatorDirectory.filter((creator) => creator.ready_for_portal);
+  const runtimeIssueCount = runtimeSecurity?.runtime_secret_issues.length ?? 0;
+
+  const productionHealthSignals: ProductionHealthSignal[] = [
+    {
+      key: "queue",
+      label: "Invoice Queue",
+      state: loadError ? "unavailable" : tasks.length > 0 ? "attention" : "good",
+      detail: loadError
+        ? `Queue unavailable: ${loadError}`
+        : tasks.length > 0
+          ? `${tasks.length} background task${tasks.length === 1 ? " is" : "s are"} active.`
+          : "No background invoice tasks are waiting.",
+    },
+    {
+      key: "due_now",
+      label: "Follow-Ups Due Now",
+      state: reminderError
+        ? "unavailable"
+        : (reminderSummary?.eligible_now_count ?? 0) > 0
+          ? "attention"
+          : "good",
+      detail: reminderError
+        ? `Reminder data unavailable: ${reminderError}`
+        : `${reminderSummary?.eligible_now_count ?? 0} invoice${(reminderSummary?.eligible_now_count ?? 0) === 1 ? "" : "s"} currently eligible for reminders.`,
+    },
+    {
+      key: "escalations",
+      label: "Escalations",
+      state: reminderError
+        ? "unavailable"
+        : (reminderSummary?.escalated_count ?? 0) > 0
+          ? "attention"
+          : "good",
+      detail: reminderError
+        ? "Escalation count unavailable."
+        : `${reminderSummary?.escalated_count ?? 0} invoice${(reminderSummary?.escalated_count ?? 0) === 1 ? "" : "s"} need manual follow-up.`,
+    },
+    {
+      key: "conversations",
+      label: "Creator Replies",
+      state: conversationError
+        ? "unavailable"
+        : conversationThreads.length > 0
+          ? "attention"
+          : "good",
+      detail: conversationError
+        ? `Conversation inbox unavailable: ${conversationError}`
+        : conversationThreads.length > 0
+          ? `${conversationThreads.length} conversation thread${conversationThreads.length === 1 ? "" : "s"} currently active.`
+          : "No active conversation threads right now.",
+    },
+    {
+      key: "security",
+      label: "Security Checks",
+      state: runtimeSecurityError ? "unavailable" : runtimeIssueCount > 0 ? "attention" : "good",
+      detail: runtimeSecurityError
+        ? `Security status unavailable: ${runtimeSecurityError}`
+        : runtimeIssueCount > 0
+          ? `${runtimeIssueCount} runtime security issue${runtimeIssueCount === 1 ? "" : "s"} detected.`
+          : "Runtime security checks are clear.",
+    },
+  ];
 
   const latestTimestamp = getLatestTimestamp(tasks);
   const columns: DataColumn<TaskSummary>[] = [
@@ -445,12 +549,13 @@ export default async function AdminPage({
   return (
     <main id="main-content" className="page-wrap">
       <div className="section-stack">
-        {/* ── Header ── */}
         <header className="admin-header reveal-item">
           <div className="admin-header__copy">
             <BrandWordmark size="sm" />
             <h1>Admin Dashboard</h1>
-            <p className="kicker">Manage creator invoices, track payments, and monitor reminder activity.</p>
+            <p className="kicker">
+              Manage live invoicing operations, monitor follow-ups, and keep creator access moving.
+            </p>
             <AdminLogoutButton />
           </div>
           <SurfaceCard className="invoicing-metric-card" aria-label="Queue snapshot">
@@ -462,14 +567,29 @@ export default async function AdminPage({
           </SurfaceCard>
         </header>
 
-        {/* ── Payment Reminders ── */}
+        <SurfaceCard as="section" className="demo-readiness-card reveal-item" data-delay="1">
+          <div className="demo-readiness-card__head">
+            <h2>Production Health</h2>
+            <p className="kicker">A quick view of what needs attention right now.</p>
+          </div>
+          <div className="demo-readiness-grid" aria-label="Production health signals">
+            {productionHealthSignals.map((signal) => (
+              <article key={signal.key} className="demo-readiness-item">
+                <div className="demo-readiness-item__head">
+                  <h3>{signal.label}</h3>
+                  <StatusBadge tone={healthTone(signal.state)}>{healthLabel(signal.state)}</StatusBadge>
+                </div>
+                <p className="muted-small">{signal.detail}</p>
+              </article>
+            ))}
+          </div>
+        </SurfaceCard>
+
         <SurfaceCard as="section" className="reminder-ops-card reveal-item" data-delay="1">
           <div className="reminder-ops-card__head">
             <h2>Payment Reminders</h2>
-            <p className="kicker">Track unpaid creator balances and send payment reminders via email and SMS.</p>
-            <p className="muted-small">
-              Demo data note: reminder counts and overdue totals may include imported 90-day history. Use test runs first
-              before any live send.
+            <p className="kicker">
+              Review unpaid invoices, preview who will be contacted, and send reminders when ready.
             </p>
           </div>
 
@@ -477,20 +597,20 @@ export default async function AdminPage({
             <form action={runRemindersAction}>
               <input type="hidden" name="mode" value="dry" />
               <button type="submit" className="button-link">
-                Test Run (No Messages Sent)
+                Preview Contacts
               </button>
             </form>
             <form action={runRemindersAction}>
               <input type="hidden" name="mode" value="live" />
               <button type="submit" className="button-link button-link--secondary">
-                Evaluate Live Run
+                Prepare Live Send
               </button>
             </form>
             {pendingRunId ? (
               <form action={sendEvaluatedRemindersAction}>
                 <input type="hidden" name="run_id" value={pendingRunId} />
                 <button type="submit" className="button-link button-link--secondary">
-                  Send Evaluated Run
+                  Send Prepared Reminders
                 </button>
               </form>
             ) : null}
@@ -513,7 +633,7 @@ export default async function AdminPage({
           ) : null}
           {pendingRunId ? (
             <p className="muted-small">
-              Pending run <code>{pendingRunId}</code>
+              Prepared run <code>{pendingRunId}</code>
               {Number.isFinite(pendingEligible) && Number.isFinite(pendingEvaluated)
                 ? `: ${pendingEligible} eligible out of ${pendingEvaluated} evaluated invoices.`
                 : "."}
@@ -525,19 +645,19 @@ export default async function AdminPage({
           ) : reminderSummary ? (
             <div className="reminder-metric-grid" aria-label="Reminder metrics">
               <div className="reminder-metric-card">
-                <span>Unpaid</span>
+                <span>Unpaid Invoices</span>
                 <strong>{reminderSummary.unpaid_count}</strong>
               </div>
               <div className="reminder-metric-card">
-                <span>Overdue</span>
+                <span>Overdue Invoices</span>
                 <strong>{reminderSummary.overdue_count}</strong>
               </div>
               <div className="reminder-metric-card">
-                <span>Eligible Now</span>
+                <span>Ready To Send</span>
                 <strong>{reminderSummary.eligible_now_count}</strong>
               </div>
               <div className="reminder-metric-card">
-                <span>Escalated</span>
+                <span>Escalations</span>
                 <strong>{reminderSummary.escalated_count}</strong>
               </div>
             </div>
@@ -545,7 +665,7 @@ export default async function AdminPage({
 
           {reminderSummary?.last_run_at ? (
             <p className="muted-small">
-              Last run {formatTimestamp(reminderSummary.last_run_at)} ({reminderSummary.last_run_dry_run ? "test run" : "live"})
+              Last run {formatTimestamp(reminderSummary.last_run_at)} ({reminderSummary.last_run_dry_run ? "preview" : "live send"})
             </p>
           ) : null}
 
@@ -568,18 +688,23 @@ export default async function AdminPage({
           )}
         </SurfaceCard>
 
-        <CreatorBalancesSection creators={creatorDirectory} loadError={creatorDirectoryError} focusYear={DEMO_FOCUS_YEAR} />
+        <CreatorBalancesSection
+          creators={creatorDirectory}
+          loadError={creatorDirectoryError}
+          focusYear={CREATOR_DIRECTORY_FOCUS_YEAR}
+          initialQuery={initialCreatorQuery}
+          initialOwedOnly={initialCreatorOwedOnly}
+        />
 
-        {/* ── Conversation Inbox ── */}
         <SurfaceCard as="section" className="invoicing-table-card reveal-item" data-delay="1">
           <div className="invoicing-table-card__head">
             <h2>Conversation Inbox</h2>
-            <p className="kicker">Monitor creator replies and handoff candidates from the two-way reminder channel.</p>
+            <p className="kicker">Review incoming creator replies and identify messages that need manual follow-up.</p>
           </div>
           {conversationError ? (
             <p className="muted-small">Conversation data unavailable: {conversationError}</p>
           ) : conversationThreads.length === 0 ? (
-            <p className="muted-small">No active conversation threads yet.</p>
+            <p className="muted-small">No active conversation threads right now.</p>
           ) : (
             <div className="escalation-list" aria-label="Conversation queue">
               <ul>
@@ -596,11 +721,10 @@ export default async function AdminPage({
           )}
         </SurfaceCard>
 
-        {/* ── Creator Access ── */}
         <SurfaceCard as="section" className="invoicing-table-card reveal-item" data-delay="1">
           <div className="invoicing-table-card__head">
             <h2>Creator Access</h2>
-            <p className="kicker">Generate and manage passkeys for creator portal access.</p>
+            <p className="kicker">Generate and manage creator passkeys for portal login.</p>
           </div>
 
           <div className="passkey-mgmt">
@@ -629,7 +753,7 @@ export default async function AdminPage({
               </div>
               <label className="muted-small" style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                 <input type="checkbox" name="force_issue_unready" />
-                Allow manual override (issue passkey even if creator is not portal-ready)
+                Allow manual override (issue passkey even if this creator is not portal-ready)
               </label>
               <button type="submit" className="button-link">Generate Passkey</button>
             </form>
@@ -649,7 +773,7 @@ export default async function AdminPage({
               ))}
             </datalist>
             <p className="muted-small">
-              Recommended creators come from invoice records with at least one dispatched invoice.
+              Recommended creators come from current invoice records with at least one dispatched invoice.
             </p>
             {creatorDirectoryError ? (
               <p className="muted-small">Creator validation unavailable: {creatorDirectoryError}</p>
@@ -672,7 +796,9 @@ export default async function AdminPage({
               <p className="muted-small">Passkey data unavailable: {passkeyError}</p>
             ) : passkeys.length > 0 ? (
               <div>
-                <h3 style={{ fontSize: "1.04rem", color: "var(--text-strong)", marginBottom: "var(--space-3)" }}>Active Creators</h3>
+                <h3 style={{ fontSize: "1.04rem", color: "var(--text-strong)", marginBottom: "var(--space-3)" }}>
+                  Active Creators
+                </h3>
                 <div className="data-table-shell">
                   <table className="data-table">
                     <thead>
@@ -694,7 +820,9 @@ export default async function AdminPage({
                           <td>
                             <form action={revokePasskeyAction} style={{ display: "inline" }}>
                               <input type="hidden" name="creator_id" value={pk.creator_id} />
-                              <button type="submit" className="button-link button-link--secondary" style={{ padding: "4px 12px", fontSize: "0.8rem" }}>Revoke</button>
+                              <button type="submit" className="button-link button-link--secondary" style={{ padding: "4px 12px", fontSize: "0.8rem" }}>
+                                Revoke
+                              </button>
                             </form>
                           </td>
                         </tr>
@@ -709,7 +837,6 @@ export default async function AdminPage({
           </div>
         </SurfaceCard>
 
-        {/* ── Current Tasks ── */}
         {loadError ? (
           <SurfaceCard as="section" className="alert-panel reveal-item" data-delay="2" role="alert" aria-live="assertive">
             <h2>Unable to Load Dashboard</h2>
@@ -726,7 +853,9 @@ export default async function AdminPage({
           <SurfaceCard as="section" className="invoicing-table-card reveal-item" data-delay="2">
             <div className="invoicing-table-card__head">
               <h2>Current Tasks</h2>
-              <p className="kicker">{latestTimestamp ? `Latest update ${formatTimestamp(latestTimestamp)}` : "No updates yet"}</p>
+              <p className="kicker">
+                {latestTimestamp ? `Latest update ${formatTimestamp(latestTimestamp)}` : "No updates yet"}
+              </p>
             </div>
 
             {tasks.length === 0 ? (
@@ -740,410 +869,59 @@ export default async function AdminPage({
           </SurfaceCard>
         )}
 
-        {/* ── Reference Documentation (collapsible) ── */}
         <details className="admin-docs-disclosure reveal-item">
-          <summary><h2>Reference Documentation</h2></summary>
+          <summary><h2>Quick Guides</h2></summary>
           <div className="admin-docs-disclosure__body">
-
-            {/* ── OpenClaw Agent Operations ── */}
             <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="1">
-              <h2>OpenClaw Agent Operations</h2>
+              <h2>What This Dashboard Is For</h2>
               <p>
-                OpenClaw runs as the orchestration layer on the agency Mac mini and calls broker-token scoped{" "}
-                <code>/agent/*</code> routes on this backend. The backend remains the source of truth for invoice state,
-                reminder eligibility, conversation policy, and webhook security enforcement.
+                This page helps operations teams monitor balances, run reminder workflows, and manage creator portal access.
               </p>
-
-              <h3>Mac mini Runtime Model</h3>
-              <ol className="admin-doc-list">
-                <li>
-                  OpenClaw gateway runs from <code>openclaw/docker/docker-compose.yml</code> and is published to{" "}
-                  <code>127.0.0.1:8080</code> (loopback-only).
-                </li>
-                <li>
-                  Backend API runs on <code>127.0.0.1:8000</code>; agent traffic is allowlisted through{" "}
-                  <code>host.docker.internal:8000</code>.
-                </li>
-                <li>
-                  Admin creates/revokes broker tokens with <code>POST /agent/tokens</code> and{" "}
-                  <code>POST /agent/tokens/revoke</code>; each agent receives least-privilege scopes and TTL limits.
-                </li>
-                <li>
-                  On every agent request, backend validates token signature, scope, expiry, and revocation before any
-                  read/write action executes.
-                </li>
-                <li>
-                  Startup and secret posture should be checked with <code>GET /admin/runtime/security</code> and{" "}
-                  <code>openclaw/scripts/verify-setup.sh</code> before live usage.
-                </li>
-              </ol>
-
-              <h3>Agent Roles And API Surface</h3>
               <ul className="admin-doc-list">
-                <li>
-                  <strong>invoice-monitor</strong>: <code>GET /agent/invoices</code>,{" "}
-                  <code>GET /agent/reminders/summary</code>, <code>GET /agent/reminders/escalations</code> for
-                  read-only visibility.
-                </li>
-                <li>
-                  <strong>notification-sender</strong>: <code>POST /agent/reminders/run/once</code> plus{" "}
-                  <code>GET /agent/reminders/escalations</code> for reminder execution and follow-up visibility.
-                </li>
-                <li>
-                  <strong>creator-conversation</strong>: <code>GET /agent/conversations/{"{thread_id}"}/context</code>,{" "}
-                  <code>POST /agent/conversations/{"{thread_id}"}/suggest-reply</code>, and{" "}
-                  <code>POST /agent/conversations/{"{thread_id}"}/execute-action</code> for guarded reply operations.
-                </li>
+                <li>Check production health cards to see what needs attention now</li>
+                <li>Use Payment Reminders to preview, prepare, and send reminder runs</li>
+                <li>Use Creator Access to issue or revoke portal passkeys</li>
               </ul>
-
-              <h3>Policy, Safety, And Handoff</h3>
-              <p>
-                OpenClaw never bypasses backend policy gates. Conversation suggestions are scored against confidence/risk
-                thresholds, auto-reply caps, and provider/channel rules. If thresholds are not met, the thread is forced
-                to <strong>human handoff</strong> even when agent automation is enabled.
-              </p>
-              <div className="admin-doc-highlight">
-                <strong>Pipeline summary:</strong> 90-day earnings import → invoice state + dispatch readiness → reminder
-                evaluation/send runs → inbound provider replies → backend policy gate → agent suggest/execute → human
-                handoff when needed.
-              </div>
             </SurfaceCard>
 
-            {/* ── Overview ── */}
             <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="2">
-              <h2>Overview</h2>
-              <p>
-                EROS Invoicing Web combines earnings ingestion, invoice dispatch, creator portal access, payment
-                tracking, reconciliation, reminder workflows, and guarded two-way creator conversations.
-              </p>
+              <h2>Reminder Workflow</h2>
               <ol className="admin-doc-list">
-                <li>Import earnings data (CSV/API) into creator invoices</li>
-                <li>Dispatch invoices to mark creators as portal-ready</li>
-                <li>Generate creator passkeys and manage session access</li>
-                <li>Track balances, payment events, and reconciliation cases</li>
-                <li>Evaluate and send reminders with durable run IDs</li>
-                <li>Handle creator replies in conversation inbox and escalation queues</li>
+                <li>Select <strong>Preview Contacts</strong> to verify who would be contacted</li>
+                <li>Select <strong>Prepare Live Send</strong> to create a reviewed run</li>
+                <li>Select <strong>Send Prepared Reminders</strong> to send that reviewed run</li>
               </ol>
-              <div className="admin-doc-highlight">
-                <strong>Key defaults:</strong> Up to <strong>6 reminders</strong> per invoice, a{" "}
-                <strong>48-hour cooldown</strong> between reminder attempts, and conversation auto-replies disabled by default.
-              </div>
+              <p>
+                If a run fails, the error banner explains what happened so you can retry safely.
+              </p>
             </SurfaceCard>
 
-            {/* ── Reminder Cycle ── */}
             <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="3">
-              <h2>Reminder Cycle</h2>
-              <p>
-                Reminder runs are operator-triggered from this dashboard. For live sends, use the two-step workflow:
-                evaluate first, then send the evaluated run.
-              </p>
-              <p className="muted-small">
-                The pipeline is fully implemented, but automated scheduler/orchestrator triggering is intentionally pending.
-                Until that handoff is enabled, all reminder runs are started manually by admins.
-              </p>
-
-              <h3>Two modes</h3>
-              <div className="admin-doc-grid">
-                <div className="admin-doc-mode-card">
-                  <h4>Test Run</h4>
-                  <p>
-                    Simulates the full cycle without sending any messages. Use this to preview which creators would be
-                    contacted and verify everything looks correct before sending.
-                  </p>
-                  <ul>
-                    <li>No emails or SMS sent</li>
-                    <li>Reminder counts are not incremented</li>
-                    <li>Results logged for review</li>
-                  </ul>
-                </div>
-                <div className="admin-doc-mode-card">
-                  <h4>Live Evaluate + Send</h4>
-                  <p>
-                    Live sends require an evaluation pass first. The evaluation produces a durable run ID, then
-                    the send step dispatches messages for that evaluated run.
-                  </p>
-                  <ul>
-                    <li>Explicit review step before delivery</li>
-                    <li>Outbox messages retry with exponential backoff</li>
-                    <li>Messages move to dead-letter after retry cap is reached</li>
-                  </ul>
-                </div>
-              </div>
+              <h2>Creator Access Basics</h2>
+              <ul className="admin-doc-list">
+                <li>Generate one passkey per creator and send it through a secure channel</li>
+                <li>Use active passkey list to confirm who currently has access</li>
+                <li>Revoke passkeys immediately when access should be removed</li>
+              </ul>
             </SurfaceCard>
 
-            {/* ── Eligibility ── */}
             <SurfaceCard as="section" className="admin-doc-card reveal-item" data-delay="4">
-              <h2>Who Gets Reminded</h2>
-              <p>An invoice is eligible for a reminder when <strong>all</strong> of the following are true:</p>
-              <ol className="admin-doc-list">
-                <li>The invoice has been dispatched to the creator</li>
-                <li>The creator has not opted out of reminders</li>
-                <li>The outstanding balance is greater than $0</li>
-                <li>Fewer than 6 reminders have been sent</li>
-                <li>The invoice due date has passed (in the creator&apos;s timezone)</li>
-                <li>At least 48 hours have passed since the last reminder attempt</li>
-              </ol>
+              <h2>When To Escalate</h2>
               <p>
-                If any condition is not met, the invoice is skipped for that cycle. You can see the skip reason in test run
-                results.
-              </p>
-            </SurfaceCard>
-
-            {/* ── Conversation Ops ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>Conversation Operations</h2>
-              <p>
-                Creator replies enter through Twilio, SendGrid, and BlueBubbles webhook endpoints. Each inbound
-                message is deduplicated and attached to a conversation thread.
+                Use the Escalation Queue when invoices need manual follow-up after repeated reminder attempts.
               </p>
               <ul className="admin-doc-list">
-                <li>Conversation Inbox shows active threads, channel, status, and latest message preview</li>
-                <li>Inbound replies are persisted even when auto-reply is disabled</li>
-                <li>Delivery callbacks update outbound message delivery state</li>
-                <li>Manual handoff/reply actions are currently API-level operations (not dashboard controls yet)</li>
-              </ul>
-              <p>
-                If auto-reply is enabled, policy checks can still force handoff when content is risky or confidence is low.
-              </p>
-            </SurfaceCard>
-
-            {/* ── Channels ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>Email, SMS &amp; iMessage Channels</h2>
-              <p>
-                Each invoice dispatch specifies channels to attempt: email, SMS, iMessage, or a combination.
-              </p>
-              <ul className="admin-doc-list">
-                <li>
-                  <strong>All selected channels are attempted</strong> for every reminder
-                </li>
-                <li>
-                  The reminder only counts as successful if <strong>all selected channels deliver</strong>
-                </li>
-                <li>If either channel fails, the entire reminder is marked as failed and the count is not incremented</li>
-              </ul>
-              <p>
-                Contact information (email addresses and phone numbers) is stored securely and masked in all dashboard
-                views and API responses.
-              </p>
-            </SurfaceCard>
-
-            {/* ── Escalation ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>Escalation</h2>
-              <p>
-                After <strong>6 reminder attempts</strong> without payment, an invoice is escalated. Escalated
-                invoices:
-              </p>
-              <ul className="admin-doc-list">
-                <li>Stop receiving additional reminder attempts</li>
-                <li>Appear in the Escalation Queue on the Invoicing Dashboard</li>
-                <li>Require manual follow-up by an admin</li>
-              </ul>
-              <p>
-                Use escalation data to choose manual follow-up actions and payment resolution steps.
-              </p>
-            </SurfaceCard>
-
-            {/* ── Invoice Status Lifecycle ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>Invoice Status Lifecycle</h2>
-              <p>Invoice statuses update automatically based on payment activity and reminder history:</p>
-              <div className="admin-doc-table-wrap">
-                <table className="admin-doc-table">
-                  <thead>
-                    <tr>
-                      <th>Status</th>
-                      <th>Meaning</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td><strong>Open</strong></td>
-                      <td>Invoice created, not yet due or no payments received</td>
-                    </tr>
-                    <tr>
-                      <td><strong>Partial</strong></td>
-                      <td>Some payment received but balance remains</td>
-                    </tr>
-                    <tr>
-                      <td><strong>Overdue</strong></td>
-                      <td>Due date has passed with outstanding balance</td>
-                    </tr>
-                    <tr>
-                      <td><strong>Escalated</strong></td>
-                      <td>6 reminders sent, no full payment, manual follow-up required</td>
-                    </tr>
-                    <tr>
-                      <td><strong>Paid</strong></td>
-                      <td>Balance is $0, fully settled</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </SurfaceCard>
-
-            {/* ── Creator Portal & Tokens ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>Creator Portal Access</h2>
-              <p>
-                Creators access their invoices through a persistent passkey. Admins generate a passkey per creator and send it
-                out-of-band.
-              </p>
-              <ol className="admin-doc-list">
-                <li>Generate a passkey for a creator in the Creator Access section above</li>
-                <li>Send the passkey to the creator (email, SMS, or any secure channel)</li>
-                <li>The creator pastes the passkey on the login page to access their portal</li>
-                <li>Sessions last 2 hours; creators can log in again with the same passkey</li>
-              </ol>
-              <div className="admin-doc-highlight">
-                <strong>Security:</strong> Passkeys are 256-bit random tokens, stored as SHA-256 hashes. Sessions use
-                HMAC-SHA256 signed tokens with 2-hour expiry. Revoking a passkey immediately blocks all new and existing
-                sessions for that creator. Generating a new passkey also rotates active sessions for that creator.
-              </div>
-            </SurfaceCard>
-
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>Webhook Security</h2>
-              <p>
-                Provider webhooks support enforceable signature verification modes. In production, set both payment
-                and conversation webhook modes to <code>enforce</code> and provide non-placeholder secrets.
-              </p>
-              <ul className="admin-doc-list">
-                <li>Payment webhooks use <code>PAYMENT_WEBHOOK_SIGNATURE_MODE</code> and provider secrets</li>
-                <li>Conversation ingress uses <code>CONVERSATION_WEBHOOK_SIGNATURE_MODE</code></li>
-                <li>Twilio, SendGrid, and BlueBubbles secrets are required only for enabled providers in enforce mode</li>
-                <li>Use <code>GET /admin/runtime/security</code> to verify active provider and guard posture</li>
+                <li>Review creator, invoice, balance, and reminder count</li>
+                <li>Coordinate direct follow-up outside the automated reminder flow</li>
+                <li>Track outcomes in your team’s operations process</li>
               </ul>
             </SurfaceCard>
-
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>Configuration</h2>
-              <p>
-                Reminder and conversation behavior is controlled by environment variables. These are set in the backend deployment and do
-                not require code changes.
-              </p>
-              <div className="admin-doc-table-wrap">
-                <table className="admin-doc-table">
-                  <thead>
-                    <tr>
-                      <th>Setting</th>
-                      <th>Default</th>
-                      <th>Description</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td><code>NOTIFIER_ENABLED</code></td>
-                      <td>Off</td>
-                      <td>Master switch for live reminder sending.</td>
-                    </tr>
-                    <tr>
-                      <td><code>REMINDER_LIVE_REQUIRES_IDEMPOTENCY</code></td>
-                      <td>On</td>
-                      <td>Requires idempotency keys for live reminder runs.</td>
-                    </tr>
-                    <tr>
-                      <td><code>REMINDER_TRIGGER_RATE_LIMIT_MAX</code></td>
-                      <td>10</td>
-                      <td>Per-actor reminder trigger ceiling inside configured window.</td>
-                    </tr>
-                    <tr>
-                      <td><code>CONVERSATION_AUTOREPLY_ENABLED</code></td>
-                      <td>Off</td>
-                      <td>Enables policy-approved automatic conversation replies.</td>
-                    </tr>
-                    <tr>
-                      <td><code>CONVERSATION_CONFIDENCE_THRESHOLD</code></td>
-                      <td>0.78</td>
-                      <td>Minimum confidence for policy-approved conversation replies.</td>
-                    </tr>
-                    <tr>
-                      <td><code>CONVERSATION_MAX_AUTO_REPLIES</code></td>
-                      <td>3</td>
-                      <td>Maximum auto-reply count per conversation thread.</td>
-                    </tr>
-                    <tr>
-                      <td><code>CONVERSATION_WEBHOOK_SIGNATURE_MODE</code></td>
-                      <td>log_only</td>
-                      <td>Webhook signature behavior for Twilio/SendGrid/BlueBubbles ingress.</td>
-                    </tr>
-                    <tr>
-                      <td><code>CONVERSATION_PROVIDER_TWILIO_ENABLED</code></td>
-                      <td>Off</td>
-                      <td>Enables Twilio inbound/status webhook ingestion.</td>
-                    </tr>
-                    <tr>
-                      <td><code>CONVERSATION_PROVIDER_SENDGRID_ENABLED</code></td>
-                      <td>Off</td>
-                      <td>Enables SendGrid inbound/status webhook ingestion.</td>
-                    </tr>
-                    <tr>
-                      <td><code>CONVERSATION_PROVIDER_BLUEBUBBLES_ENABLED</code></td>
-                      <td>Off</td>
-                      <td>Enables BlueBubbles iMessage inbound/status webhook ingestion.</td>
-                    </tr>
-                    <tr>
-                      <td><code>PAYMENT_WEBHOOK_SIGNATURE_MODE</code></td>
-                      <td>log_only</td>
-                      <td>Webhook signature behavior for payment providers.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </SurfaceCard>
-
-            {/* ── Timing Reference ── */}
-            <SurfaceCard as="section" className="admin-doc-card reveal-item">
-              <h2>Timing Reference</h2>
-              <div className="admin-doc-table-wrap">
-                <table className="admin-doc-table">
-                  <thead>
-                    <tr>
-                      <th>Parameter</th>
-                      <th>Value</th>
-                      <th>Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>Max reminders per invoice</td>
-                      <td><strong>6</strong></td>
-                      <td>After 6, invoice is escalated</td>
-                    </tr>
-                    <tr>
-                      <td>Cooldown between reminders</td>
-                      <td><strong>48 hours</strong></td>
-                      <td>Minimum time between reminder attempts for the same invoice</td>
-                    </tr>
-                    <tr>
-                      <td>Due date timezone</td>
-                      <td>Creator&apos;s timezone</td>
-                      <td>Falls back to UTC if no timezone is set for the creator</td>
-                    </tr>
-                    <tr>
-                      <td>Creator session TTL</td>
-                      <td><strong>120 minutes</strong></td>
-                      <td>Configured via <code>CREATOR_SESSION_TTL_MINUTES</code></td>
-                    </tr>
-                    <tr>
-                      <td>Broker token default TTL</td>
-                      <td><strong>60 minutes</strong></td>
-                      <td>Configured via <code>BROKER_TOKEN_DEFAULT_TTL_MINUTES</code></td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </SurfaceCard>
-
           </div>
         </details>
 
-        {/* ── Footer ── */}
         <footer className="admin-footer reveal-item">
           <p className="muted-small">
-            This page is for agency administrators only. Creators access their invoices through passkey-authenticated portal sessions and
-            cannot see this page.
+            This page is for agency administrators only. Creators access invoices through passkey-authenticated portal sessions.
           </p>
         </footer>
       </div>

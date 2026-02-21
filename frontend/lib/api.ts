@@ -422,6 +422,16 @@ export interface AdminCreatorDirectoryItem {
   ready_for_portal: boolean;
 }
 
+export interface AdminRuntimeSecurityStatus {
+  runtime_secret_guard_mode: "off" | "warn" | "enforce";
+  conversation_webhook_signature_mode: "off" | "log_only" | "enforce";
+  payment_webhook_signature_mode: "off" | "log_only" | "enforce";
+  conversation_enabled: boolean;
+  notifier_enabled: boolean;
+  providers_enabled: Record<string, boolean>;
+  runtime_secret_issues: string[];
+}
+
 export async function listPasskeys(adminToken: string): Promise<{ creators: PasskeyListItem[] }> {
   const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/passkeys`, {
     method: "GET",
@@ -448,6 +458,18 @@ export async function listAdminCreators(
     cache: "no-store",
   });
   return decodeJson(response, "List admin creators");
+}
+
+export async function getAdminRuntimeSecurity(adminToken: string): Promise<AdminRuntimeSecurityStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/invoicing/admin/runtime/security`, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    cache: "no-store",
+  });
+  return decodeJson(response, "Runtime security status");
 }
 
 export async function revokePasskey(

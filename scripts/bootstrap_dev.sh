@@ -19,7 +19,7 @@ backend_deps_present() {
 import importlib.util
 import sys
 
-for module_name in ("fastapi", "pytest"):
+for module_name in ("fastapi", "pytest", "alembic", "invoicing_web"):
     if importlib.util.find_spec(module_name) is None:
         sys.exit(1)
 PY
@@ -40,7 +40,7 @@ else
     python3 -m pip install -e ".[dev]"
   ) || {
     echo "error: backend dependency install failed (likely offline or package index unavailable)." >&2
-    echo "hint: restore network/package index access or pre-install fastapi/pytest into python3." >&2
+    echo "hint: restore network/package index access or pre-install fastapi/pytest/alembic and invoicing_web into python3." >&2
     exit 1
   }
 fi

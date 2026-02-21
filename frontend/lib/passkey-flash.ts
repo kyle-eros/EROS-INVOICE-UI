@@ -1,6 +1,7 @@
 export const ADMIN_PASSKEY_FLASH_COOKIE = "admin_passkey_flash";
 
 export interface AdminPasskeyFlashPayload {
+  creator_id: string;
   creator_name: string;
   passkey: string;
 }
@@ -30,15 +31,19 @@ export function encodeAdminPasskeyFlash(payload: AdminPasskeyFlashPayload): stri
 export function decodeAdminPasskeyFlash(value: string): AdminPasskeyFlashPayload | null {
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf-8")) as Record<string, unknown>;
+    const creatorId = parsed.creator_id;
     const creator = parsed.creator_name;
     const passkey = parsed.passkey;
+    if (typeof creatorId !== "string" || !creatorId.trim()) {
+      return null;
+    }
     if (typeof creator !== "string" || !creator.trim()) {
       return null;
     }
     if (typeof passkey !== "string" || !passkey.trim()) {
       return null;
     }
-    return { creator_name: creator, passkey };
+    return { creator_id: creatorId, creator_name: creator, passkey };
   } catch {
     return null;
   }

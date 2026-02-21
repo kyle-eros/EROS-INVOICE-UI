@@ -4,7 +4,7 @@ import {
   ADMIN_PASSKEY_FLASH_COOKIE,
   adminPasskeyFlashCookieOptions,
   decodeAdminPasskeyFlash,
-} from "../../../../lib/passkey-flash";
+} from "../../../lib/passkey-flash";
 
 export async function GET() {
   const cookieStore = await cookies();
@@ -14,8 +14,8 @@ export async function GET() {
 
   const response = NextResponse.json(
     decoded
-      ? { creator_name: decoded.creator_name, passkey: decoded.passkey }
-      : { creator_name: null, passkey: null },
+      ? { creator_id: decoded.creator_id, creator_name: decoded.creator_name, passkey: decoded.passkey }
+      : { creator_id: null, creator_name: null, passkey: null },
     { status: 200 },
   );
 

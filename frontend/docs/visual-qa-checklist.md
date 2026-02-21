@@ -23,8 +23,14 @@
 - [ ] Empty task list shows intended empty state.
 - [ ] Reminder API failure shows alert panel/error text.
 - [ ] Queue metric card reflects error and non-error state correctly.
-- [ ] Creator Balances Owed section renders Jan full invoice + Feb current owed columns correctly for the focus year.
-- [ ] Creator Balances Owed section shows non-USD exclusion note when applicable.
+- [ ] Production Health section shows clear status cards for queue, follow-ups, escalations, conversations, and security checks.
+- [ ] Creator Balances section renders production totals and counts (owed USD, unpaid, dispatched, payment submitted).
+- [ ] Creator Balances section shows non-USD exclusion note when applicable.
+- [ ] Creator Balances search filters rows by creator name/id and result count updates correctly.
+- [ ] Owed-only toggle filters to creators with outstanding balances and clear filters restores defaults.
+- [ ] Creator Access passkey flash shows copy actions for passkey, creator ID, and portal link.
+- [ ] Copy-action feedback announces success/failure and fallback guidance when clipboard access is blocked.
+- [ ] Admin page no longer shows reset/reseed controls or demo artifact links.
 
 ## Creator Portal States
 - [ ] `/portal` summary card shows January full invoice totals and February current owed totals for the focus year.

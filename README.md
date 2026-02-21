@@ -232,6 +232,8 @@ Use `.env.example` as baseline.
 ### Auth + Sessions
 - `AUTH_STORE_BACKEND` (`inmemory` or `postgres`)
 - `DATABASE_URL`
+  - For local persistent SQLite, use an absolute path under `data/`, for example:
+    `sqlite+pysqlite:////absolute/path/to/EROS-Invoicing-Web/data/invoicing_local.db`.
 - `ADMIN_PASSWORD`
 - `ADMIN_SESSION_SECRET`
 - `CREATOR_SESSION_SECRET`
@@ -295,7 +297,7 @@ BACKEND_DISABLE_RELOAD=true ./scripts/start_backend_dev.sh
 ### Migrations
 ```bash
 cd backend
-alembic -c alembic.ini upgrade head
+python3 -m alembic -c alembic.ini upgrade head
 ```
 
 ### Tests
@@ -334,7 +336,7 @@ Reseed validation report defaults to:
 
 Important:
 - when `INVOICE_STORE_BACKEND=inmemory`, invoice/task domain state is reset on restart,
-- when `INVOICE_STORE_BACKEND=postgres` (including SQLite via `DATABASE_URL=sqlite+pysqlite:///...`), invoice/task state persists across restarts.
+- when `INVOICE_STORE_BACKEND=postgres` (including SQLite via `DATABASE_URL=sqlite+pysqlite:////absolute/path/to/EROS-Invoicing-Web/data/invoicing_local.db`), invoice/task state persists across restarts.
 
 ## Seed Workflow
 

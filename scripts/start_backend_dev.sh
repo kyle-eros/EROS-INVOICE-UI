@@ -12,6 +12,22 @@ require_cmd() {
   fi
 }
 
+require_python_module() {
+  local module_name="$1"
+  if ! python3 - "$module_name" <<'PY'
+import importlib.util
+import sys
+
+module_name = sys.argv[1]
+if importlib.util.find_spec(module_name) is None:
+    sys.exit(1)
+PY
+  then
+    echo "error: required python module not found: $module_name" >&2
+    exit 1
+  fi
+}
+
 lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
@@ -45,7 +61,7 @@ conversation_backend="$(lower "${CONVERSATION_STORE_BACKEND:-inmemory}")"
 invoice_backend="$(lower "${INVOICE_STORE_BACKEND:-inmemory}")"
 
 if [[ "$auth_backend" == "postgres" || "$reminder_backend" == "postgres" || "$conversation_backend" == "postgres" || "$invoice_backend" == "postgres" ]]; then
-  require_cmd alembic
+  require_python_module alembic
 
   if [[ -z "${DATABASE_URL:-}" ]]; then
     echo "error: DATABASE_URL is required when a *_STORE_BACKEND is set to postgres." >&2
@@ -55,7 +71,7 @@ if [[ "$auth_backend" == "postgres" || "$reminder_backend" == "postgres" || "$co
   echo "Running Alembic migrations (postgres backends enabled)..."
   (
     cd "$ROOT_DIR/backend"
-    alembic -c alembic.ini upgrade head
+    python3 -m alembic -c alembic.ini upgrade head
   )
 fi
 
